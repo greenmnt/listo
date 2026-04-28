@@ -1,0 +1,326 @@
+        {
+            "props": {
+                "pageProps": {
+                    "layoutProps": {
+                        "title": "4000+ Properties Sold \u0026 Auction Results in Burleigh Heads, QLD, 4220 | Domain",
+                        "description": "Domain has 4000+ Properties Sold \u0026 Auction Results in Burleigh Heads, QLD, 4220 \u0026 surrounding suburbs. View our listings \u0026 use our detailed filters to find your perfect home.",
+                        "canonical": "https://www.domain.com.au/sold-listings/burleigh-heads-qld-4220/",
+                        "metatags": [
+                            {
+                                "component": "link",
+                                "rel": "alternate",
+                                "href": "android-app://com.fairfax.domain/https/www.domain.com.au/sold-listings/burleigh-heads-qld-4220//"
+                            },
+                            {
+                                "component": "meta",
+                                "property": "og:title",
+                                "content": "4000+ Properties Sold \u0026 Auction Results in Burleigh Heads, QLD, 4220 | Domain"
+                            },
+                        ],
+                        "disableAds": false,
+                        "disableTracking": false,
+                        "isFromEu": false,
+                        "digitalData": {
+                            "page": {
+                                "pageInfo": {
+                                    "pageId": "search results - sold",
+                                    "pageName": "search results - sold",
+                                    "search": {
+                                        "agencyIds": "12823,24127,12231,26406,16179,31985,36004,24538",
+                                        "bathroomsFrom": "0",
+                                        "bathroomsTo": "5+",
+                                        "bedroomsFrom": "0",
+                                        "bedroomsTo": "5+",
+                                        "carSpaces": "0,1,2,3,4,5",
+                                        "geoType": "Suburb",
+                                        "mapSearch": "Off",
+                                        "searchType": "Location",
+                                        "medianPrice": 1369000,
+                                        "postcode": "4220",
+                                        "primaryPropertyType": "Any",
+                                        "secondaryPropertyType": "Any",
+                                        "resultsPages": 50,
+                                        "resultsRecords": "2020525007,2020325357,2020523360,2020522538,2020488988,2020306412,2020343793,2020484077,2020491571,2020435864,2020391410,2020418135,2020459570",
+                                        "searchArea": "Gold Coast Region",
+                                        "searchDataDefaults": {
+                                            "sortBy": "Default",
+                                            "bedroomsFrom": "0",
+                                            "bedroomsTo": "5+",
+                                            "bathroomsFrom": "0",
+                                            "bathroomsTo": "5+",
+                                            "carSpaces": "0,1,2,3,4,5",
+                                            "excludePriceWithheld": "On",
+                                            "primaryPropertyType": "Any",
+                                            "surroundingSuburbs": "On"
+                                        },
+                                        "searchDepth": 1,
+                                        "searchLocationCat": "Suburb",
+                                        "searchRegion": "Gold Coast Greater Region",
+                                        "searchResultCount": 20400,
+                                        "searchSuburb": "Burleigh Heads",
+                                        "searchTerm": "Burleigh Heads, 4220, QLD",
+                                        "searchTypeView": "ListView",
+                                        "sortBy": "SoldDate",
+                                        "state": "QLD",
+                                        "suburbId": "burleigh-heads-qld-4220",
+                                        "surroundingSuburbs": "On",
+                                        "excludePriceWithheld": "On"
+                                    },
+                                    "brand": "domain",
+                                    "generator": "DO",
+                                    "sysEnv": "responsive",
+                                    "isEmbeddedApp": false
+                                },
+                                "category": {
+                                    "primaryCategory": "Sold",
+                                    "subCategory1": "Search Results",
+                                    "pageType": "Search Page"
+                                },
+                                "optimize": {
+                                    "shortlistExperimentFlag": true
+                                }
+                            },
+                            "titan": {
+                                "adZone": "sold/searchresults",
+                                "adKeyValues": {
+                                    "cat": "sold",
+                                    "cat1": "searchresults",
+                                    "ctype": "index",
+                                    "e": "www.domain.com.au",
+                                    "features": "",
+                                    "locstate": "qld",
+                                    "locarea": "gold_coast_region",
+                                    "locregion": "gold_coast_greater_region",
+                                    "locsuburb": [
+                                        "burleigh_heads"
+                                    ],
+                                    "locpostcode": [
+                                        "4220"
+                                    ],
+                                    "usertype": "sold",
+                                    "medianPrice": 1369000
+                                },
+                                "adSite": "DOMAIN.COM.AU",
+                                "adSlots": [
+                                ]
+                            },
+                            "adLoader": "prebid",
+                            "version": "1.0",
+                            "events": [
+                            ],
+                            "user": {
+                                "membershipType": "visitor",
+                                "sessionToken": "048f510b-3313-4ad4-84e4-2923f86e7c9e",
+                                "membershipState": "Not_logged_in",
+                                "dhlMembership": "inactive",
+                                "ipAddress": "3OgbOlkFLlc15FEm54xAwRbgp35QoPYdlp7vo1Bfml9g9BevP30YFJU5pItFMhrh"
+                            }
+                        },
+                        "jsonLdItems": [
+                            {
+                                "@context": "http://schema.org",
+                                "@type": "Organization",
+                                "name": "Domain",
+                                "url": "https://www.domain.com.au",
+                                "sameAs": [
+                                    "https://www.facebook.com/domain.com.au",
+                                ]
+                            },
+                            {
+                                    "@context": "http://schema.org",
+                                    "@type": "Event",
+                                    "location": {
+                                        "@type": "Residence",
+                                        "geo": {
+                                            "@type": "GeoCoordinates",
+                                            "latitude": -28.09119,
+                                            "longitude": 153.45746
+                                        },
+                                        "name": "1 Short Street, Burleigh Heads",
+                                        "address": {
+                                            "@type": "PostalAddress",
+                                            "addressLocality": "BURLEIGH HEADS",
+                                            "addressRegion": "QLD",
+                                            "postalCode": "4220",
+                                            "streetAddress": "1 Short Street"
+                                        }
+                                    },
+                                    "name": "Auction",
+                                    "description": "Auction at 1 Short Street",
+                                    "url": "https://www.domain.com.au/1-short-street-burleigh-heads-qld-4220-2020418135",
+                                    "image": "https://bucket-api.domain.com.au/v1/bucket/image/2020418135_1_1_251112_063947-w4464-h2970",
+                                    "startDate": "2025-12-12T11:45:00"
+                                },
+                                {
+                                    "@context": "http://schema.org",
+                                    "@type": "Residence",
+                                    "address": {
+                                        "@type": "PostalAddress",
+                                        "streetAddress": "21 Sirec Way",
+                                        "addressLocality": "BURLEIGH HEADS",
+                                        "addressRegion": "QLD",
+                                        "postalCode": "4220"
+                                    }
+                                },
+                                    {
+                                        "@context": "http://schema.org",
+                                        "@type": "BreadcrumbList",
+                                        "itemListElement": [
+                                            {
+                                                "@type": "ListItem",
+                                                "position": 1,
+                                                "item": {
+                                                    "@id": "https://www.domain.com.au/sold-listings/",
+                                                    "name": "Sold"
+                                                }
+                                            },
+                                        ]
+                                    }
+                                ],
+                                "raygunTags": [
+                                    "isSearchResults"
+                                ],
+                                "featureFlags": {
+                                    "enableContentSnippet": false,
+                                    "enableContentSnippetWithPostcodes": false,
+                                    "disableAdsFlag": false,
+                                    "enableEnquiryCustomisations": true,
+                                    "shortlistExperimentFlag": true,
+                                    "enableSuggestedFeatures": true,
+                                    "enableAdditionalDescriptionFeature": true,
+                                    "enableVerticalGallery": true,
+                                    "enableRetirements": true,
+                                    "enablePropertyNextSteps": true,
+                                    "enablePropertyNextStepsBackend": true,
+                                    "enableAddNotes": false,
+                                    "textAdsEnabled": true,
+                                    "enableMobileBannerAppDriver": false,
+                                    "enableCustomSort": true,
+                                    "enableMRECAd": false,
+                                    "enableVectorGoogleMaps": false,
+                                    "enableBranch": true,
+                                    "googleOneTap": true,
+                                    "schoolSearchMapView": true,
+                                    "enablePropertyAlertPaginationCTA": false,
+                                    "enableIndependentOne": false,
+                                    "enableIndependentTwo": true,
+                                    "enableIndependentThree": false,
+                                    "enableHomePagePropertyAlert": true,
+                                    "enableShortlistPhotoGallery": false,
+                                    "enablePropertyAlertOverlay": true,
+                                    "enableShortlistNotesEditing": false,
+                                    "enableShortlistNotesEditingMobile": false,
+                                    "enableShortlistSignupDriverMl": false,
+                                    "enableShortlistSignupDriverSimple": false,
+                                    "enableHomepageSchoolFirstTypeahead": true,
+                                    "enableGraphQLSuggestLocations": true,
+                                    "shareShortlistBranchExperiment": false,
+                                    "enableNewDevelopmentEnquiryForm": false,
+                                    "enableTypeaheadSchoolMessage": false,
+                                    "enableSuggestSuburbNewPill": false,
+                                    "enableBuyerTypeExperiment": false,
+                                    "enableBuyerTypeExperimentStarted": false,
+                                    "mobileWebThirdPartyRentalButton": true,
+                                    "enableUPVExperiment": true,
+                                    "enableNewProjectListingViewMore": true,
+                                    "enableRequestFloorPlanForChildListing": true,
+                                    "enableSearchDisplayPriceRange": false,
+                                    "enableGraphQLSearch": false,
+                                    "enableGraphQLSavedSearch": false,
+                                    "topspotGQL": false,
+                                    "enableBYBTextlink": false,
+                                    "enableGQLOnListingsPage": true,
+                                    "enableListingsPageGQLMapping": false,
+                                    "immediateEmailNotifications": false,
+                                    "postInspectionAd": false,
+                                    "postEnquiryAd": true,
+                                    "enableGraphQLUPVSoldListings": true,
+                                    "premarketListingGQL": false,
+                                    "enableGraphQLFeaturedAgency": true,
+                                    "enableGraphQLTopspot": true,
+                                    "platinumListingGalleryAds": true,
+                                    "disableProjectVerticalGallery": false,
+                                    "priceGuideExp": false,
+                                    "enableGraphQLNewToYou": true,
+                                    "platinumListingsInlineEnquiryExp": false,
+                                    "twoColumnExperimentForPlatinumListings": true,
+                                    "enableRequestFloorPlanExp": false,
+                                    "enablePpid": true,
+                                    "enableRentalFormDataFromGQL": true,
+                                    "enableRentalListingPageUpdates": true,
+                                    "disableSwipeToCloseFBBrowser": true,
+                                    "enableSchoolSlugMapRemoval": true,
+                                    "enableListingMediaAds": true,
+                                    "enableListingMediaAdUnloan": false,
+                                    "enableListingMediaAdLiberty": true,
+                                    "enableListingMediaAdAussieBroadband": true,
+                                    "enableListingMediaAdAllianz": true,
+                                    "enableListingMediaAdNBN": true,
+                                    "galleryControlsExperiment": false,
+                                    "enableMiniGalleryPreviewExp": true,
+                                    "verticalGalleryExperiment": false,
+                                    "enableGoogleOneTapSearchPage": false,
+                                    "enableGoogleOneTapListingPage": false,
+                                    "stickyAgentCardRentalListing": true,
+                                    "enableEnquiryRecaptcha": true,
+                                    "enableEnquiryRecaptchaLoginBypass": true,
+                                    "enableEnquiryRecaptchaV2Fallback": true,
+                                    "enableSearchListingsGTMDefer": true,
+                                    "enableVendorLeadCTA": true,
+                                    "enableVendorLeadCTABranded": true,
+                                    "enableVendorLeadCTAOnTop": false,
+                                    "enableSearchListingsINPOptimise": true,
+                                    "enableListingDetailsWebPImageFormat": true,
+                                    "enableNewProjectBannerUrl": true,
+                                    "enableResponsiveHeroImageCrop": true,
+                                    "enableAgentAvatarImageResizeGQL": true,
+                                    "enableTigerSearchListingsImagePreloading": true,
+                                    "enableSearchListingsSPASharedLayout": true,
+                                    "enableMatterport": false,
+                                    "enableMatterportExterior3DTour": false
+                                },
+                                "ppid": "5ec749f713cc13d74fbc09867ef441aad166591e2f1af2d6ff393f0467b14e88",
+                                "heroImages": {
+                                    "small": "https://rimh2.domainstatic.com.au/Xo2H0FKUaGDn9pbZYn-D3-Plpjg=/660x440/filters:format(jpeg):quality(80)/2020525007_1_1_260113_053542-w1200-h800",
+                                    "medium": "https://rimh2.domainstatic.com.au/Xo2H0FKUaGDn9pbZYn-D3-Plpjg=/660x440/filters:format(jpeg):quality(80)/2020525007_1_1_260113_053542-w1200-h800",
+                                    "large": "https://rimh2.domainstatic.com.au/Xo2H0FKUaGDn9pbZYn-D3-Plpjg=/660x440/filters:format(jpeg):quality(80)/2020525007_1_1_260113_053542-w1200-h800",
+                                    "xLarge": "https://rimh2.domainstatic.com.au/Xo2H0FKUaGDn9pbZYn-D3-Plpjg=/660x440/filters:format(jpeg):quality(80)/2020525007_1_1_260113_053542-w1200-h800"
+                                }
+                            },
+                            "componentProps": {
+                                "theme": "domain",
+                                "isMapView": false,
+                                "baseUrl": "https://www.domain.com.au",
+                                "signupPath": "/authentications/signup",
+                                "logoutPath": "/authentications/logoff",
+                                "loginPath": "/authentications/login",
+                                "mode": "sold",
+                                "productSegment": "sold",
+                                "noAds": false,
+                                "lazyLoadImages": true,
+                                "estimatedDeviceWidth": "1280px",
+                                "estimatedDeviceHeight": "800px",
+                                "mapViewUrl": "https://www.domain.com.au/sold-listings/burleigh-heads-qld-4220/?excludepricewithheld=1\u0026displaymap=1",
+                                "breadcrumbs": [
+                                    {
+                                        "title": "Sold",
+                                        "url": "/sold-listings/"
+                                    },
+                                    {
+                                        "title": "QLD",
+                                        "url": "/sold-listings/qld/"
+                                    },
+                                    {
+                                        "title": "Burleigh Heads",
+                                        "url": "/sold-listings/burleigh-heads-qld-4220/"
+                                    }
+                                ],
+                                "currentPage": 1,
+                                "totalPages": 50,
+                                "paginatorTemplateUrl": "/sold-listings/burleigh-heads-qld-4220/?excludepricewithheld=1\u0026page={{ page }}",
+                                "listingSearchResultIds": [
+                                    2020269673
+                                ],
+                                "listingsMap": {
+                                    "2020269673": //Rust Listing type
+

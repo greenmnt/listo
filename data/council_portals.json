@@ -1,0 +1,47 @@
+{
+  "_comment": "Per-council development application (DA) portal info. Used by the planning enrichment phase to scrape approved unit counts and (where available) builder names. system identifies the underlying portal software so we can share scraper code across councils running the same system (e.g. Infor ePathway is used by ~50 AU councils).",
+
+  "application_type_codes": {
+    "_note": "Common Australian council DA prefixes — what they mean and which ones we actually care about for unit-count enrichment.",
+    "MCU":  {"name": "Material Change of Use",   "use_for_unit_count": true,  "notes": "The actual approval to build/change use. Description usually contains keyword like 'DUAL OCCUPANCY', 'MULTIPLE DWELLING', 'MULTI UNIT'."},
+    "BWK":  {"name": "Building Works",            "use_for_unit_count": false, "notes": "Approval for construction itself; doesn't add unit count info beyond what MCU says."},
+    "OPW":  {"name": "Operational Works",         "use_for_unit_count": false, "notes": "Landscaping, driveways, drainage. Useful as evidence of an active build but doesn't tell us unit count."},
+    "ROL":  {"name": "Reconfiguring a Lot",       "use_for_unit_count": true,  "notes": "Lot subdivision — if the description mentions 'X new lots' that's our number."},
+    "PD":   {"name": "Plumbing / Drainage",       "use_for_unit_count": false, "notes": "Often filed alongside builds."},
+    "DA":   {"name": "Development Application (generic)", "use_for_unit_count": true, "notes": "Some councils use generic DA prefix; description still carries the keyword."}
+  },
+
+  "unit_count_keywords": {
+    "_note": "Regex patterns to extract approved unit count from MCU descriptions. Order matters — try most specific first.",
+    "DUAL_OCCUPANCY": {"pattern": "(?i)\\bdual\\s+occupanc(?:y|ies)\\b",         "units": 2},
+    "TRIPLE":         {"pattern": "(?i)\\btriple\\b",                              "units": 3},
+    "TRIPLEX":        {"pattern": "(?i)\\btriplex\\b",                             "units": 3},
+    "FOURPLEX":       {"pattern": "(?i)\\bfourplex\\b",                            "units": 4},
+    "EXPLICIT_UNITS": {"pattern": "(?i)(\\d+)\\s+(?:units?|dwellings?|townhouses?|apartments?|lots?)\\b", "units": "from_capture_group_1"},
+    "MULTI_UNIT":     {"pattern": "(?i)\\bmulti(?:ple)?[\\s-]+(?:unit|dwelling|residential)\\b", "units": "unknown_multi"}
+  },
+
+  "councils": [
+    {
+      "slug": "gold_coast",
+      "name": "City of Gold Coast",
+      "state": "QLD",
+      "covers_postcodes": ["4207", "4208", "4209", "4210", "4211", "4212", "4213", "4214", "4215", "4216", "4217", "4218", "4220", "4221", "4223", "4224", "4225", "4226", "4227", "4228"],
+      "da_portal": {
+        "url": "https://cogc.cloud.infor.com/ePathway/ePthProd/web/GeneralEnquiry/EnquiryLists.aspx?ModuleCode=LAP",
+        "system": "infor_epathway",
+        "module_code": "LAP",
+        "search_by_address_supported": true,
+        "search_by_lot_supported": true,
+        "decision_notice_pdfs": true,
+        "internal_property_id_field": "PN",
+        "internal_property_id_notes": "PN<digits> appears in description (e.g. 'PN62487/01/DA2'). Same PN ties together every DA on a single lot across years. Use as a stable per-property key.",
+        "application_id_format": "{TYPE}/{YYYY}/{N}",
+        "example_application_ids": ["MCU/2017/973", "OPW/2018/1200", "MCU/2007/2700139"],
+        "notes": "Infor ePathway. ASP.NET form with ViewState — needs session-aware scraper (POST with __VIEWSTATE + __EVENTVALIDATION carried across requests). Search returns paginated table; clicking application_id loads detail page with linked PDFs (Decision Notice, Plans, Assessment Report)."
+      },
+      "planning_alerts_authority": "gold_coast",
+      "open_data_portal": "https://data-goldcoast.opendata.arcgis.com/datasets?q=Development+Applications+and+Determinations"
+    }
+  ]
+}

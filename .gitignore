@@ -1,0 +1,35 @@
+# secrets + local config
+.env
+.env.local
+*.cookies
+
+# python build/cache
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# runtime artefacts (recreatable from raw_pages / re-fetch)
+data/da_docs/
+*.log
+
+# local DB dumps
+*.sql.gz
+*.sqlite
+*.db
+
+# logs from background jobs
+/tmp/listo-*.log
+
+# rust scaffolding (kept as reference but build outputs ignored)
+scrape/target/
+
+# IDE
+.idea/
+.vscode/
+*.swp
