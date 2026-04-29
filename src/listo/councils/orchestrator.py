@@ -311,25 +311,98 @@ def run_council(
 
         scraper_ctx = backend.factory()
         with scraper_ctx as scraper:
-            sink = DbRequestSink(council_slug=council.slug, vendor=scraper.vendor)
-            if do_list:
-                stats["list"] += _phase_list(scraper, sink, date_from=lo, date_to=hi)
-            if do_detail:
-                stats["detail"] += _phase_detail(
-                    scraper, sink,
-                    council_slug=council.slug, vendor=scraper.vendor,
-                    date_from=lo, date_to=hi, limit=detail_limit,
+            sink = DbRequestSink(council_slug=scraper.council_slug, vendor=scraper.vendor)
+            # Record this scrape attempt so 'is window X..Y done?' has a
+            # direct answer in the DB rather than being inferred from
+            # per-app timestamps. We update the row on success/failure.
+            window_id = _start_scrape_window(
+                council_slug=scraper.council_slug,
+                vendor=scraper.vendor,
+                backend_name=backend.name,
+                date_from=lo, date_to=hi,
+            )
+            list_count = detail_count = docs_apps = docs_files = 0
+            try:
+                if do_list:
+                    list_count = _phase_list(scraper, sink, date_from=lo, date_to=hi)
+                    stats["list"] += list_count
+                if do_detail:
+                    detail_count = _phase_detail(
+                        scraper, sink,
+                        council_slug=scraper.council_slug, vendor=scraper.vendor,
+                        date_from=lo, date_to=hi, limit=detail_limit,
+                    )
+                    stats["detail"] += detail_count
+                if do_docs:
+                    docs_apps, docs_files = _phase_docs(
+                        scraper, sink,
+                        council_slug=scraper.council_slug, vendor=scraper.vendor,
+                        date_from=lo, date_to=hi, limit=docs_limit, doc_dir=doc_dir,
+                    )
+                    stats["docs"] += docs_apps
+                    stats["doc_files"] += docs_files
+            except Exception as e:
+                _finish_scrape_window(
+                    window_id, status="failed", error=str(e)[:1000],
+                    apps_yielded=list_count, files_downloaded=docs_files,
                 )
-            if do_docs:
-                added_apps, added_files = _phase_docs(
-                    scraper, sink,
-                    council_slug=council.slug, vendor=scraper.vendor,
-                    date_from=lo, date_to=hi, limit=docs_limit, doc_dir=doc_dir,
+                raise
+            else:
+                _finish_scrape_window(
+                    window_id, status="completed",
+                    apps_yielded=list_count, files_downloaded=docs_files,
                 )
-                stats["docs"] += added_apps
-                stats["doc_files"] += added_files
 
     return stats
+
+
+def _start_scrape_window(
+    *,
+    council_slug: str,
+    vendor: str,
+    backend_name: str,
+    date_from: date,
+    date_to: date,
+) -> int:
+    from listo.models import CouncilScrapeWindow
+    now = datetime.utcnow()
+    with session_scope() as s:
+        row = CouncilScrapeWindow(
+            council_slug=council_slug,
+            vendor=vendor,
+            backend_name=backend_name,
+            date_from=date_from,
+            date_to=date_to,
+            started_at=now,
+            status="running",
+        )
+        s.add(row)
+        s.flush()
+        return row.id
+
+
+def _finish_scrape_window(
+    window_id: int,
+    *,
+    status: str,
+    error: str | None = None,
+    apps_yielded: int = 0,
+    files_downloaded: int = 0,
+) -> None:
+    from listo.models import CouncilScrapeWindow
+    now = datetime.utcnow()
+    with session_scope() as s:
+        s.execute(
+            update(CouncilScrapeWindow)
+            .where(CouncilScrapeWindow.id == window_id)
+            .values(
+                finished_at=now,
+                status=status,
+                error=error,
+                apps_yielded=apps_yielded,
+                files_downloaded=files_downloaded,
+            )
+        )
 
 
 def _phase_list(scraper, sink, *, date_from: date, date_to: date) -> int:

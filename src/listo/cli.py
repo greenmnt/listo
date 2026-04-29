@@ -137,6 +137,54 @@ def council_scrape(
     )
 
 
+@council_app.command("coverage")
+def council_coverage(
+    slug: str = typer.Argument(..., help="council slug (e.g. cogc)"),
+    status_filter: str = typer.Option("", "--status", help="filter to one status: running / completed / failed / aborted"),
+    limit: int = typer.Option(50, "--limit", help="cap rows returned"),
+) -> None:
+    """Show every scrape attempt against this council, with date window
+    and status. Use this to see what's been finished and what's still
+    pending. Note: applications are persisted with the *data* slug
+    ('cogc') even when invoked via 'cogc_http', so coverage rows for
+    the two backends interleave under the same slug.
+    """
+    where = "council_slug = :slug"
+    params = {"slug": slug}
+    if status_filter:
+        where += " AND status = :status"
+        params["status"] = status_filter
+    sql = text(f"""
+        SELECT date_from, date_to, status, started_at, finished_at,
+               TIMESTAMPDIFF(SECOND, started_at, COALESCE(finished_at, NOW())) AS elapsed_s,
+               apps_yielded, files_downloaded, backend_name, vendor,
+               COALESCE(LEFT(error, 80), '') AS error_snippet
+          FROM council_scrape_windows
+         WHERE {where}
+         ORDER BY started_at DESC
+         LIMIT :limit
+    """)
+    params["limit"] = limit
+    with session_scope() as s:
+        rows = s.execute(sql, params).fetchall()
+    if not rows:
+        typer.echo(f"no scrape windows recorded for {slug}")
+        return
+    typer.echo(
+        f"{'date_from':<11} {'date_to':<11} {'status':<10} "
+        f"{'apps':>5} {'files':>5} {'elapsed':>8}  {'backend':<26} when"
+    )
+    for r in rows:
+        elapsed = f"{r.elapsed_s}s" if r.elapsed_s is not None else "—"
+        when = (r.finished_at or r.started_at).strftime("%Y-%m-%d %H:%M")
+        typer.echo(
+            f"{r.date_from} {r.date_to} {r.status:<10} "
+            f"{r.apps_yielded:>5} {r.files_downloaded:>5} {elapsed:>8}  "
+            f"{r.backend_name:<26} {when}"
+            + (f"  ERROR: {r.error_snippet}" if r.error_snippet else "")
+        )
+
+
 @council_app.command("resume")
 def council_resume(
     slug: str = typer.Argument(..., help="council slug"),

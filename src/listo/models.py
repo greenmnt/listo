@@ -260,6 +260,35 @@ class CouncilRequest(Base):
     )
 
 
+class CouncilScrapeWindow(Base):
+    """One row per (council, backend, date-window) scrape attempt.
+
+    Lets us see at a glance whether a given date range has been fully
+    walked, what's currently running, and what failed and where.
+    """
+    __tablename__ = "council_scrape_windows"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    council_slug: Mapped[str] = mapped_column(String(40), nullable=False)
+    vendor: Mapped[str] = mapped_column(String(40), nullable=False)
+    backend_name: Mapped[str] = mapped_column(String(60), nullable=False)
+    date_from: Mapped[date] = mapped_column(Date, nullable=False)
+    date_to: Mapped[date] = mapped_column(Date, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    pages_walked: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    apps_yielded: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    apps_with_docs: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    files_downloaded: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        Index("ix_csw_council_window", "council_slug", "date_from", "date_to"),
+        Index("ix_csw_status", "council_slug", "status", "finished_at"),
+    )
+
+
 class MortgageRate(Base):
     __tablename__ = "mortgage_rates"
 

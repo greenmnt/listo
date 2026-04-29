@@ -21,7 +21,7 @@ import mimetypes
 import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from typing import Iterator
@@ -65,6 +65,11 @@ class InforEpathwayConfig:
     enquiry_lists: list[str]                   # labels of enquiry lists to walk (in order)
     docs_portal_id_url: str                    # template like 'https://.../default.aspx?id={id}'
     docs_portal_oid_url: str                   # template like 'https://.../default.aspx?oid={oid}'
+    # Optional label → enquiry-list-id mapping. The HTTP backend uses
+    # this to skip the entry-page radio dance and go directly to
+    # EnquirySearch.aspx?EnquiryListId=N. The Playwright backend
+    # ignores it (it clicks the radio by label text instead).
+    enquiry_list_ids: dict[str, str] = field(default_factory=dict)
 
 
 # ---- COGC ----
@@ -79,6 +84,10 @@ COGC_CONFIG = InforEpathwayConfig(
         "Development applications after July 2017",
         "Development applications before July 2017",
     ],
+    enquiry_list_ids={
+        "Development applications after July 2017": "102",
+        "Development applications before July 2017": "115",
+    },
     docs_portal_id_url="https://integrations.goldcoast.qld.gov.au/pdonline/default.aspx?id={id}",
     docs_portal_oid_url="https://integrations.goldcoast.qld.gov.au/pdonline/default.aspx?oid={oid}",
 )

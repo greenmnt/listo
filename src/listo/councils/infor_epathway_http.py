@@ -323,18 +323,18 @@ class InforEpathwayHttpScraper:
                 total_rows += 1
                 yield listing
 
-            # Advance to next page via postback (image button has the
-            # next-page navigation wired up server-side).
-            next_html = self._click_next_page(results_url, results_html, sink)
-            if next_html is None:
+            # Advance to next page via the nextPageHyperLink postback.
+            nxt = self._click_next_page(results_url, results_html, sink)
+            if nxt is None:
                 logger.info(
                     "[%s] (http) no Next page — finished walk: %d pages, %d rows",
                     self.council_slug, page_index, total_rows,
                 )
                 return
+            results_url, results_html = nxt
             page_index += 1
             self._sleep()
-            results_html = next_html
+            self._results_url = results_url
             self._results_html = results_html
             logger.info("[%s] (http) advanced to page %d", self.council_slug, page_index)
 
@@ -345,31 +345,59 @@ class InforEpathwayHttpScraper:
         date_to: date,
         sink: RequestSink,
     ) -> tuple[str, str]:
-        """Walk EnquiryLists → EnquirySearch → EnquirySummaryView.
-        Returns (results_url, results_html)."""
-        # 1. GET the enquiry-list selection page
+        """EnquiryLists → EnquirySearch → submit search.
+        Returns (results_url, results_html).
+
+        Direct GET to ``EnquirySearch.aspx?EnquiryListId=N`` returns
+        302→Error.aspx because the server requires you to have come
+        through ``EnquiryLists.aspx`` first (which sets session
+        state). So we walk that path: GET the entry page, POST it
+        with the right radio + Next button set, follow into
+        EnquirySearch, switch to Date range tab, then submit dates.
+        """
+        enquiry_list_id = (self.config.enquiry_list_ids or {}).get(enquiry_label)
+        if not enquiry_list_id:
+            raise RuntimeError(
+                f"InforEpathwayHttpScraper requires enquiry_list_ids in config; "
+                f"missing id for {enquiry_label!r}"
+            )
+
+        # 1. GET the entry page so the session cookie / hidden
+        # form state get established.
         list_url = self.config.lists_url
         r = self._http("GET", list_url, sink=sink, purpose="list")
         list_html = r.text
         list_url_resolved = str(r.url)
 
-        # 2. POST with the chosen enquiry list radio + Next button.
-        # The radio's value is the enquiry list id (e.g. "102"). We
-        # discover it by matching the visible label in the dropdown.
-        enquiry_list_id = _find_enquiry_list_id(list_html, enquiry_label)
-        if enquiry_list_id is None:
+        # 2. POST the entry page with the right enquiry list radio
+        # selected + the Next button pressed.
+        #
+        # The entry page renders the enquiry lists as a <table
+        # id="...mDataGrid">: column 0 has a radio button whose value
+        # is an internal control id (NOT the enquiry list id), column
+        # 1 has the human-readable label. We match by label and use
+        # the radio's own (name, value) as the form field. The Next
+        # submit button is named ...$mContinueButton, value='Next'.
+        radio_name, radio_value = _find_enquiry_list_radio(list_html, enquiry_label)
+        if radio_name is None:
+            diag = _dump_enquiry_list_grid(list_html)
             raise RuntimeError(
-                f"could not find enquiry list radio for {enquiry_label!r}"
+                f"could not find entry-page radio for {enquiry_label!r}.\n"
+                f"DataGrid contents:\n{diag}"
             )
-
         fields = _extract_form_state(list_html)
-        # Set the enquiry list dropdown to the chosen id
-        fields = _set_dropdown(fields, list_html, "mEnquiryListsDropDownList", enquiry_list_id)
-        # Press Next (the image-button on the entry page)
-        next_button = _find_button_name(list_html, value_match="Next")
-        if next_button:
-            fields[f"{next_button}.x"] = "1"
-            fields[f"{next_button}.y"] = "1"
+        fields[radio_name] = radio_value
+
+        # Press the Next submit button. Prefer the explicit submit
+        # control (mContinueButton, name=value); fall back to the
+        # image-button arrow at the top (.x/.y coordinate fields).
+        cont_name, cont_kind = _find_continue_button(list_html)
+        if cont_name:
+            if cont_kind == "submit":
+                fields[cont_name] = "Next"
+            else:
+                fields[f"{cont_name}.x"] = "1"
+                fields[f"{cont_name}.y"] = "1"
 
         action = _form_action(list_html, list_url_resolved)
         r = self._http(
@@ -378,11 +406,14 @@ class InforEpathwayHttpScraper:
         )
         search_url = str(r.url)
         search_html = r.text
+        if "Error.aspx" in search_url:
+            raise RuntimeError(
+                f"entry-page POST landed on Error.aspx — session not established"
+            )
 
-        # 3. POST: switch to "Date range search" tab via tab control
-        #    postback. The tab control exposes its menu via a TabControl
-        #    panel; the postback target is "...$mTabControl$tabControlMenu"
-        #    with __EVENTARGUMENT being the tab index.
+        # 2. POST: switch to the "Date range search" tab via the tab
+        # control postback (the date inputs only become valid form
+        # values when this tab is the active one).
         tab_target, tab_index = _find_date_range_tab(search_html)
         if tab_target is None:
             raise RuntimeError("could not locate Date range search tab")
@@ -397,7 +428,7 @@ class InforEpathwayHttpScraper:
         search_url = str(r.url)
         search_html = r.text
 
-        # 4. Fill the date inputs and POST with the Search button.
+        # 3. Fill the date inputs and POST with the Search submit button.
         from_name = _find_input_name_ending(search_html, "$mFromDatePicker$dateTextBox")
         to_name = _find_input_name_ending(search_html, "$mToDatePicker$dateTextBox")
         if not (from_name and to_name):
@@ -409,7 +440,6 @@ class InforEpathwayHttpScraper:
         fields[to_name] = date_to.strftime("%d/%m/%Y")
         fields["__EVENTTARGET"] = ""
         fields["__EVENTARGUMENT"] = ""
-        # Press the Search submit button by name=value
         search_button = _find_button_name(search_html, value_match="Search")
         if search_button:
             fields[search_button] = "Search"
@@ -426,28 +456,54 @@ class InforEpathwayHttpScraper:
         results_html: str,
         sink: RequestSink,
     ) -> str | None:
-        """Postback the next-page image button. Returns the new results
-        HTML, or None if there is no next page."""
+        """Advance to the next results page via the nextPageHyperLink
+        postback. Returns new results HTML, or None when we're already
+        on the last page.
+
+        Mechanism: the page's onclick handler does
+            theForm.action = 'EnquirySummaryView.aspx?PageNumber=N+1';
+            theForm.__EVENTTARGET = '...$nextPageHyperLink';
+            theForm.submit();
+        We replicate by POSTing to the same URL with PageNumber set
+        and __EVENTTARGET pointing at the next-page control. The
+        server reads PageNumber from the query string to render the
+        right page and uses __EVENTTARGET to recognise the click.
+        """
         next_name = _find_next_page_button(results_html)
         if not next_name:
             return None
+
+        # Pull current page number out of "Page N of M" so we can
+        # compute the target.
+        m = re.search(r"Page\s+(\d+)\s+of\s+(\d+)", results_html)
+        if not m:
+            return None
+        current_page = int(m.group(1))
+        total_pages = int(m.group(2))
+        if current_page >= total_pages:
+            return None
+        target_page = current_page + 1
+
+        # Build target URL: same path + query, PageNumber overridden.
+        from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
+        parsed = urlparse(results_url)
+        qs = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        qs["PageNumber"] = str(target_page)
+        target_url = urlunparse(parsed._replace(query=urlencode(qs)))
+
         fields = _extract_form_state(results_html)
         fields["__EVENTTARGET"] = next_name
         fields["__EVENTARGUMENT"] = ""
-        # Image-button click: include .x / .y too so older ASP.NET
-        # tenants that detect via coordinate fields still process it.
-        fields[f"{next_name}.x"] = "1"
-        fields[f"{next_name}.y"] = "1"
-        action = _form_action(results_html, results_url)
+
         try:
             r = self._http(
-                "POST", action, sink=sink, purpose="list",
+                "POST", target_url, sink=sink, purpose="list",
                 data=fields, referer=results_url,
             )
         except Exception as e:
             logger.warning("[%s] (http) next-page POST failed: %s", self.council_slug, e)
             return None
-        return r.text
+        return str(r.url), r.text
 
     # ---- per-row capture ----
 
@@ -882,35 +938,71 @@ def _parse_gvdocs(html: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def _find_enquiry_list_id(html: str, label: str) -> str | None:
-    """The enquiry-list <select> has options like:
-       <option value='102'>Development applications after July 2017</option>
-    Match on label text and return the value."""
+def _find_continue_button(html: str) -> tuple[str | None, str]:
+    """Find the 'Next' / continue button on a wizard-style ePathway
+    page. Returns (name, kind) where kind is 'submit' or 'image' so
+    the caller knows whether to set name=value or name.x/name.y."""
     doc = HTMLParser(html)
-    sel = doc.css_first("select[name$='mEnquiryListsDropDownList']")
-    if sel is None:
-        return None
-    for opt in sel.css("option"):
-        if (opt.text() or "").strip() == label:
-            return opt.attributes.get("value")
-    return None
+    # Prefer an explicit submit button with value containing 'Next'.
+    for inp in doc.css("input[type='submit']"):
+        if "next" in (inp.attributes.get("value") or "").lower():
+            return inp.attributes.get("name"), "submit"
+    # Fall back to a stage-next image button.
+    for inp in doc.css("input[type='image']"):
+        src = (inp.attributes.get("src") or "").lower()
+        alt = (inp.attributes.get("alt") or "").lower()
+        title = (inp.attributes.get("title") or "").lower()
+        if "stage-next" in src or "next" in alt or "next" in title:
+            return inp.attributes.get("name"), "image"
+    return None, ""
 
 
-def _set_dropdown(
-    fields: dict[str, str],
-    html: str,
-    name_suffix: str,
-    new_value: str,
-) -> dict[str, str]:
-    """Find the <select> whose name ends with name_suffix and set its
-    value in `fields`."""
+def _find_enquiry_list_radio(html: str, label: str) -> tuple[str | None, str | None]:
+    """Locate the radio button on the entry page corresponding to a
+    given enquiry-list label.
+
+    The entry page uses a DataGrid with this row layout:
+        | <input type=radio> | "Development applications after July 2017" | "..." |
+    All radios share the same name (it's a group); their values are
+    internal control ids. We match by the label text in column 1 and
+    return the (name, value) pair to set in the POST.
+    """
     doc = HTMLParser(html)
-    for sel in doc.css("select"):
-        name = sel.attributes.get("name") or ""
-        if name.endswith(name_suffix) or name_suffix in name:
-            fields[name] = new_value
-            return fields
-    return fields
+    grid = doc.css_first("table[id*='mDataGrid']")
+    if grid is None:
+        return None, None
+    for tr in grid.css("tr"):
+        tds = tr.css("td")
+        if len(tds) < 2:
+            continue
+        radio = tds[0].css_first("input[type='radio']")
+        if radio is None:
+            continue
+        # Most tenants put the label in tds[1]; check the next few too
+        # in case there's a visibility-hidden cell between.
+        for cell in tds[1:3]:
+            text = (cell.text() or "").strip()
+            if text == label:
+                return radio.attributes.get("name"), radio.attributes.get("value")
+    return None, None
+
+
+def _dump_enquiry_list_grid(html: str) -> str:
+    """For diagnostics when label matching misses — show every row
+    with its radio value + cell texts."""
+    doc = HTMLParser(html)
+    grid = doc.css_first("table[id*='mDataGrid']")
+    if grid is None:
+        return "(no DataGrid table found on page)"
+    lines = []
+    for tr in grid.css("tr"):
+        tds = tr.css("td, th")
+        radio = tr.css_first("input[type='radio']")
+        cells = [(td.text() or "").strip()[:60] for td in tds]
+        lines.append(
+            f"  radio={radio.attributes.get('value') if radio else '—'!r}  cells={cells}"
+        )
+    return "\n".join(lines) or "(no rows)"
 
 
 def _find_button_name(html: str, *, value_match: str) -> str | None:

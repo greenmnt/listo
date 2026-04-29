@@ -70,6 +70,36 @@ def _cogc_pre_2017():
     return InforEpathwayScraper(cfg)
 
 
+def _cogc_post_2017_http():
+    from listo.councils.infor_epathway import COGC_CONFIG
+    from listo.councils.infor_epathway_http import InforEpathwayHttpScraper
+    label = "Development applications after July 2017"
+    cfg = type(COGC_CONFIG)(
+        council_slug="cogc",
+        lists_url=COGC_CONFIG.lists_url,
+        enquiry_lists=[label],
+        enquiry_list_ids={label: COGC_CONFIG.enquiry_list_ids[label]},
+        docs_portal_id_url=COGC_CONFIG.docs_portal_id_url,
+        docs_portal_oid_url=COGC_CONFIG.docs_portal_oid_url,
+    )
+    return InforEpathwayHttpScraper(cfg)
+
+
+def _cogc_pre_2017_http():
+    from listo.councils.infor_epathway import COGC_CONFIG
+    from listo.councils.infor_epathway_http import InforEpathwayHttpScraper
+    label = "Development applications before July 2017"
+    cfg = type(COGC_CONFIG)(
+        council_slug="cogc",
+        lists_url=COGC_CONFIG.lists_url,
+        enquiry_lists=[label],
+        enquiry_list_ids={label: COGC_CONFIG.enquiry_list_ids[label]},
+        docs_portal_id_url=COGC_CONFIG.docs_portal_id_url,
+        docs_portal_oid_url=COGC_CONFIG.docs_portal_oid_url,
+    )
+    return InforEpathwayHttpScraper(cfg)
+
+
 def _newcastle_etrack():
     from listo.councils.techone_etrack import NEWCASTLE_CONFIG, TechOneEtrackScraper
     return TechOneEtrackScraper(NEWCASTLE_CONFIG)
@@ -94,6 +124,28 @@ COUNCILS: dict[str, CouncilDef] = {
             CouncilBackend(
                 name="cogc_pre_2017",
                 factory=_cogc_pre_2017,
+                covers_to=date(2017, 6, 30),
+            ),
+        ),
+    ),
+    # Same council as 'cogc' but using the v2 HTTP backend (no browser).
+    # Same DB rows (council_slug='cogc'), so progress on one slug is
+    # visible to the other and the docs_fetched_at skip set works
+    # across both. Pick whichever backend gives better throughput on
+    # your hardware.
+    "cogc_http": CouncilDef(
+        slug="cogc_http",
+        name="City of Gold Coast (HTTP backend)",
+        state="QLD",
+        backends=(
+            CouncilBackend(
+                name="cogc_post_2017_http",
+                factory=_cogc_post_2017_http,
+                covers_from=date(2017, 7, 1),
+            ),
+            CouncilBackend(
+                name="cogc_pre_2017_http",
+                factory=_cogc_pre_2017_http,
                 covers_to=date(2017, 6, 30),
             ),
         ),
