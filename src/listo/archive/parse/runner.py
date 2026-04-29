@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import gzip
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Iterable
 
@@ -26,6 +27,10 @@ class RunStats:
     sales_upserted: int = 0
     properties_upserted: int = 0
     errors: int = 0
+    # Listings counted per (suburb, postcode, source). Excluded from repr so
+    # the existing one-line stats output stays tidy; render via a table in
+    # the CLI when it's useful.
+    listings_by_suburb: Counter = field(default_factory=Counter, repr=False)
 
 
 def _decompress(body_gz: bytes) -> str:
@@ -197,11 +202,13 @@ def _process_one_raw(
     html = _decompress(raw_page.body_gz)
     parsed = _parse_html(raw_page.source, html)
     now = datetime.utcnow()
+    suburb_key = (raw_page.suburb or "?", raw_page.postcode or "?", raw_page.source)
     for raw in parsed.listings:
         prop_id = _upsert_property(s, raw, now)
         _upsert_listing(s, raw, prop_id, raw_page.id, raw_page.source, now)
         _upsert_sale(s, raw, prop_id, raw_page.id, raw_page.source)
         stats.listings_upserted += 1
+        stats.listings_by_suburb[suburb_key] += 1
         if raw.listing_kind == "sold" and raw.sold_date:
             stats.sales_upserted += 1
         stats.properties_upserted += 1

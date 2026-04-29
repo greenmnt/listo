@@ -137,11 +137,22 @@ def _parse_au_date(s: str | None) -> date | None:
 
 
 def _ensure_wayland() -> None:
-    """Patchright with mutter-headless requires WAYLAND_DISPLAY pointing at a
-    running headless mutter compositor. Match the convention used elsewhere in
-    the project so this module's caller doesn't have to remember."""
-    if not os.environ.get("WAYLAND_DISPLAY"):
-        os.environ["WAYLAND_DISPLAY"] = "wayland-99"
+    """Force WAYLAND_DISPLAY=wayland-99 so chromium connects to the headless
+    mutter compositor instead of the user's real Wayland session.
+
+    Without overriding, a normal shell already has WAYLAND_DISPLAY=wayland-0
+    (the live GNOME session) and chromium happily opens windows there.
+    The mutter compositor must already be running on wayland-99:
+        mutter --headless --virtual-monitor=1920x1080 --wayland-display=wayland-99 &
+    """
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    socket_path = f"{runtime_dir}/wayland-99"
+    if not os.path.exists(socket_path):
+        raise RuntimeError(
+            f"mutter compositor socket not found at {socket_path}. Start it with:\n"
+            "  mutter --headless --virtual-monitor=1920x1080 --wayland-display=wayland-99 &"
+        )
+    os.environ["WAYLAND_DISPLAY"] = "wayland-99"
     os.environ.pop("DISPLAY", None)
 
 

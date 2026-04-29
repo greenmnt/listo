@@ -9,6 +9,7 @@ dependencies = [
     "browser-cookie3>=0.20",
     "playwright>=1.48",
     "patchright>=1.48",
+    "camoufox[geoip]>=0.4",
     "pypdf>=4.0",
     "sqlalchemy>=2.0",
     "pymysql>=1.1",

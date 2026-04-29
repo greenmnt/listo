@@ -129,7 +129,12 @@ def _parse_date_display(text: str | None) -> date | None:
 def _intval(node: Any) -> int | None:
     if isinstance(node, dict):
         v = node.get("value")
-        return int(v) if isinstance(v, (int, float)) else None
+        if isinstance(v, (int, float)):
+            iv = int(v)
+            # beds/baths/parking are tinyint unsigned (max 255). Anything
+            # over 99 is source-data corruption (real listing seen in the
+            # wild: parking=256). Drop it rather than overflow the column.
+            return iv if 0 <= iv <= 99 else None
     return None
 
 

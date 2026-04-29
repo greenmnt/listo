@@ -31,6 +31,33 @@ def was_fetched_recently(source: str, url: str, max_age_hours: int) -> bool:
         return row is not None
 
 
+def get_cached_body(source: str, url: str, max_age_hours: int) -> str | None:
+    """Return the most recent cached body for this URL within the window, or None.
+
+    Used by the bucketed fetcher to decide split-or-fetch for a price bracket
+    without re-issuing the network request when we already have page 1.
+    """
+    import gzip
+    url_hash = _sha256(url.encode("utf-8"))
+    cutoff = datetime.utcnow() - timedelta(hours=max_age_hours)
+    with session_scope() as s:
+        row = s.execute(
+            select(RawPage.body_gz).where(
+                RawPage.source == source,
+                RawPage.url_hash == url_hash,
+                RawPage.fetched_at >= cutoff,
+            )
+            .order_by(RawPage.fetched_at.desc())
+            .limit(1)
+        ).first()
+        if not row:
+            return None
+        try:
+            return gzip.decompress(row[0]).decode("utf-8", errors="replace")
+        except Exception:
+            return None
+
+
 def store_raw_page(
     *,
     source: str,
