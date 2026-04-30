@@ -175,6 +175,7 @@ class CouncilApplication(Base):
     list_first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
     detail_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
     docs_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    summarised_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
 
     __table_args__ = (
@@ -186,6 +187,7 @@ class CouncilApplication(Base):
         Index("ix_ca_suburb", "suburb", "postcode"),
         Index("ix_ca_pending_detail", "detail_fetched_at", "council_slug"),
         Index("ix_ca_pending_docs", "docs_fetched_at", "council_slug"),
+        Index("ix_ca_pending_summary", "summarised_at"),
     )
 
 
@@ -324,3 +326,391 @@ class CrawlRun(Base):
     __table_args__ = (
         Index("ix_runs_resume", "source", "page_type", "suburb", "postcode", "started_at"),
     )
+
+
+# ---------------- property history (per-source PDP snapshots) ----------------
+
+
+class DomainProperty(Base):
+    __tablename__ = "domain_properties"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    raw_page_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("raw_pages.id"), nullable=False)
+    property_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("properties.id"))
+
+    domain_property_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    domain_apollo_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    url_slug: Mapped[str] = mapped_column(String(255), nullable=False)
+    url: Mapped[str] = mapped_column(String(1024), nullable=False)
+
+    display_address: Mapped[str] = mapped_column(String(255), nullable=False)
+    unit_number: Mapped[str] = mapped_column(String(16), nullable=False, default="")
+    street_number: Mapped[str] = mapped_column(String(16), nullable=False, default="")
+    street_name: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    street_type: Mapped[str] = mapped_column(String(20), nullable=False, default="")
+    suburb: Mapped[str] = mapped_column(String(80), nullable=False)
+    postcode: Mapped[str] = mapped_column(String(4), nullable=False)
+    state: Mapped[str] = mapped_column(String(3), nullable=False)
+    lat: Mapped[float | None] = mapped_column()
+    lng: Mapped[float | None] = mapped_column()
+
+    lot_number: Mapped[str | None] = mapped_column(String(20))
+    plan_number: Mapped[str | None] = mapped_column(String(20))
+
+    property_type: Mapped[str | None] = mapped_column(String(40))
+    bedrooms: Mapped[int | None] = mapped_column(SmallInteger)
+    bathrooms: Mapped[int | None] = mapped_column(SmallInteger)
+    parking_spaces: Mapped[int | None] = mapped_column(SmallInteger)
+    land_area_m2: Mapped[int | None] = mapped_column(Integer)
+    internal_area_m2: Mapped[int | None] = mapped_column(Integer)
+
+    valuation_low: Mapped[int | None] = mapped_column(Integer)
+    valuation_mid: Mapped[int | None] = mapped_column(Integer)
+    valuation_high: Mapped[int | None] = mapped_column(Integer)
+    valuation_confidence: Mapped[str | None] = mapped_column(String(40))
+    valuation_date: Mapped[date | None] = mapped_column(Date)
+    rent_estimate_weekly: Mapped[int | None] = mapped_column(Integer)
+    rent_yield_pct: Mapped[float | None] = mapped_column()
+
+    raw_property_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    parsed_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+
+
+class DomainSale(Base):
+    __tablename__ = "domain_sales"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    domain_property_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("domain_properties.id"), nullable=False
+    )
+    property_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("properties.id"))
+    raw_page_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("raw_pages.id"), nullable=False)
+
+    event_date: Mapped[date | None] = mapped_column(Date)
+    event_price: Mapped[int | None] = mapped_column(Integer)
+    category: Mapped[str] = mapped_column(String(20), nullable=False)
+    price_description: Mapped[str | None] = mapped_column(String(120))
+    is_sold: Mapped[bool] = mapped_column(default=False)
+    is_major_event: Mapped[bool] = mapped_column(default=False)
+    days_on_market: Mapped[int | None] = mapped_column(Integer)
+    agency_name: Mapped[str | None] = mapped_column(String(160))
+    agency_profile_url: Mapped[str | None] = mapped_column(String(255))
+
+    raw_event_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
+class RealestateProperty(Base):
+    __tablename__ = "realestate_properties"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    raw_page_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("raw_pages.id"), nullable=False)
+    property_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("properties.id"))
+
+    rea_property_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    url_slug: Mapped[str] = mapped_column(String(255), nullable=False)
+    url: Mapped[str] = mapped_column(String(1024), nullable=False)
+    pca_property_url: Mapped[str | None] = mapped_column(String(1024))
+
+    display_address: Mapped[str] = mapped_column(String(255), nullable=False)
+    unit_number: Mapped[str] = mapped_column(String(16), nullable=False, default="")
+    street_number: Mapped[str] = mapped_column(String(16), nullable=False, default="")
+    street_name: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    suburb: Mapped[str] = mapped_column(String(80), nullable=False)
+    postcode: Mapped[str] = mapped_column(String(4), nullable=False)
+    state: Mapped[str] = mapped_column(String(3), nullable=False)
+    lat: Mapped[float | None] = mapped_column()
+    lng: Mapped[float | None] = mapped_column()
+
+    property_type: Mapped[str | None] = mapped_column(String(40))
+    bedrooms: Mapped[int | None] = mapped_column(SmallInteger)
+    bathrooms: Mapped[int | None] = mapped_column(SmallInteger)
+    car_spaces: Mapped[int | None] = mapped_column(SmallInteger)
+    land_area_m2: Mapped[int | None] = mapped_column(Integer)
+    floor_area_m2: Mapped[int | None] = mapped_column(Integer)
+    year_built: Mapped[int | None] = mapped_column(SmallInteger)
+
+    status_label: Mapped[str | None] = mapped_column(String(40))
+    market_status: Mapped[str | None] = mapped_column(String(40))
+
+    valuation_low: Mapped[int | None] = mapped_column(Integer)
+    valuation_mid: Mapped[int | None] = mapped_column(Integer)
+    valuation_high: Mapped[int | None] = mapped_column(Integer)
+    valuation_confidence: Mapped[str | None] = mapped_column(String(40))
+    rent_estimate_weekly: Mapped[int | None] = mapped_column(Integer)
+    rent_yield_pct: Mapped[float | None] = mapped_column()
+
+    raw_property_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    parsed_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+
+
+class RealestateSale(Base):
+    __tablename__ = "realestate_sales"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    realestate_property_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("realestate_properties.id"), nullable=False
+    )
+    property_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("properties.id"))
+    raw_page_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("raw_pages.id"), nullable=False)
+
+    event_date: Mapped[date | None] = mapped_column(Date)
+    event_price: Mapped[int | None] = mapped_column(Integer)
+    price_text: Mapped[str | None] = mapped_column(String(120))
+    event_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    agency_name: Mapped[str | None] = mapped_column(String(160))
+    listing_url: Mapped[str | None] = mapped_column(String(1024))
+
+    raw_event_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
+class RealestateListing(Base):
+    __tablename__ = "realestate_listings"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    raw_page_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("raw_pages.id"), nullable=False)
+    realestate_property_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("realestate_properties.id")
+    )
+
+    rea_listing_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    url: Mapped[str] = mapped_column(String(1024), nullable=False)
+
+    listing_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    listing_status: Mapped[str | None] = mapped_column(String(40))
+    display_address: Mapped[str] = mapped_column(String(255), nullable=False)
+    property_type: Mapped[str | None] = mapped_column(String(40))
+
+    price_text: Mapped[str | None] = mapped_column(String(160))
+    sold_price: Mapped[int | None] = mapped_column(Integer)
+    sold_date: Mapped[date | None] = mapped_column(Date)
+    sale_method: Mapped[str | None] = mapped_column(String(40))
+
+    bedrooms: Mapped[int | None] = mapped_column(SmallInteger)
+    bathrooms: Mapped[int | None] = mapped_column(SmallInteger)
+    car_spaces: Mapped[int | None] = mapped_column(SmallInteger)
+    land_area_m2: Mapped[int | None] = mapped_column(Integer)
+    floor_area_m2: Mapped[int | None] = mapped_column(Integer)
+
+    agency_name: Mapped[str | None] = mapped_column(String(160))
+    agent_name: Mapped[str | None] = mapped_column(String(160))
+
+    description: Mapped[str | None] = mapped_column(Text)
+    features_json: Mapped[dict | None] = mapped_column(JSON)
+    photos_json: Mapped[dict | None] = mapped_column(JSON)
+
+    raw_listing_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    parsed_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+
+
+class DomainListing(Base):
+    __tablename__ = "domain_listings"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    raw_page_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("raw_pages.id"), nullable=False)
+    domain_property_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("domain_properties.id")
+    )
+
+    domain_listing_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    url: Mapped[str] = mapped_column(String(1024), nullable=False)
+
+    listing_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    listing_status: Mapped[str | None] = mapped_column(String(40))
+    display_address: Mapped[str] = mapped_column(String(255), nullable=False)
+    property_type: Mapped[str | None] = mapped_column(String(40))
+
+    price_text: Mapped[str | None] = mapped_column(String(160))
+    sold_price: Mapped[int | None] = mapped_column(Integer)
+    sold_date: Mapped[date | None] = mapped_column(Date)
+    sale_method: Mapped[str | None] = mapped_column(String(40))
+
+    bedrooms: Mapped[int | None] = mapped_column(SmallInteger)
+    bathrooms: Mapped[int | None] = mapped_column(SmallInteger)
+    car_spaces: Mapped[int | None] = mapped_column(SmallInteger)
+    land_area_m2: Mapped[int | None] = mapped_column(Integer)
+
+    agency_name: Mapped[str | None] = mapped_column(String(160))
+    agent_name: Mapped[str | None] = mapped_column(String(160))
+
+    description: Mapped[str | None] = mapped_column(Text)
+    features_json: Mapped[dict | None] = mapped_column(JSON)
+    photos_json: Mapped[dict | None] = mapped_column(JSON)
+
+    raw_listing_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    parsed_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+
+
+class DiscoveredUrl(Base):
+    __tablename__ = "discovered_urls"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    search_address: Mapped[str] = mapped_column(String(255), nullable=False)
+    search_query: Mapped[str] = mapped_column(String(255), nullable=False)
+    url: Mapped[str] = mapped_column(String(1024), nullable=False)
+    url_hash: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
+    url_kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    search_engine: Mapped[str] = mapped_column(String(20), nullable=False)
+    discovered_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+
+
+# ---------------- DA summaries (Ollama-extracted) ----------------
+
+
+class DaDocSummary(Base):
+    __tablename__ = "da_doc_summaries"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    document_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("council_application_documents.id"), nullable=False
+    )
+    application_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("council_applications.id"), nullable=False
+    )
+    doc_type: Mapped[str | None] = mapped_column(String(120))
+    doc_position: Mapped[str] = mapped_column(String(10), nullable=False)
+    tier: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=1)
+    model: Mapped[str] = mapped_column(String(80), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(20), nullable=False)
+    summarised_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+
+    template_key: Mapped[str | None] = mapped_column(String(40))
+    text_chars: Mapped[int | None] = mapped_column(Integer)
+    text_sha256: Mapped[bytes | None] = mapped_column(LargeBinary(32))
+    pages_used: Mapped[str | None] = mapped_column(String(60))
+    extraction_method: Mapped[str] = mapped_column(String(20), nullable=False, default="pymupdf")
+    extraction_notes: Mapped[str | None] = mapped_column(Text)
+
+    applicant_name: Mapped[str | None] = mapped_column(String(255))
+    applicant_acn: Mapped[str | None] = mapped_column(String(9))
+    applicant_abn: Mapped[str | None] = mapped_column(String(11))
+    applicant_entity_type: Mapped[str | None] = mapped_column(String(20))
+    applicant_agent_name: Mapped[str | None] = mapped_column(String(255))
+    builder_name: Mapped[str | None] = mapped_column(String(255))
+    architect_name: Mapped[str | None] = mapped_column(String(255))
+    owner_name: Mapped[str | None] = mapped_column(String(255))
+    owner_acn: Mapped[str | None] = mapped_column(String(9))
+    owner_abn: Mapped[str | None] = mapped_column(String(11))
+    owner_entity_type: Mapped[str | None] = mapped_column(String(20))
+    dwelling_count: Mapped[int | None] = mapped_column(SmallInteger)
+    dwelling_kind: Mapped[str | None] = mapped_column(String(40))
+    project_description: Mapped[str | None] = mapped_column(Text)
+    lot_on_plan: Mapped[str | None] = mapped_column(String(120))
+    street_address: Mapped[str | None] = mapped_column(String(255))
+    confidence: Mapped[str | None] = mapped_column(String(10))
+
+    raw_response_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
+class DaSummary(Base):
+    __tablename__ = "da_summaries"
+
+    application_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("council_applications.id"), primary_key=True
+    )
+    applicant_name: Mapped[str | None] = mapped_column(String(255))
+    applicant_acn: Mapped[str | None] = mapped_column(String(9))
+    applicant_abn: Mapped[str | None] = mapped_column(String(11))
+    applicant_entity_type: Mapped[str | None] = mapped_column(String(20))
+    applicant_agent_name: Mapped[str | None] = mapped_column(String(255))
+    builder_name: Mapped[str | None] = mapped_column(String(255))
+    architect_name: Mapped[str | None] = mapped_column(String(255))
+    owner_name: Mapped[str | None] = mapped_column(String(255))
+    owner_acn: Mapped[str | None] = mapped_column(String(9))
+    owner_abn: Mapped[str | None] = mapped_column(String(11))
+    owner_entity_type: Mapped[str | None] = mapped_column(String(20))
+    dwelling_count: Mapped[int | None] = mapped_column(SmallInteger)
+    dwelling_kind: Mapped[str | None] = mapped_column(String(40))
+    project_description: Mapped[str | None] = mapped_column(Text)
+    lot_on_plan: Mapped[str | None] = mapped_column(String(120))
+    street_address: Mapped[str | None] = mapped_column(String(255))
+    source_doc_ids_json: Mapped[dict | None] = mapped_column(JSON)
+
+    # FKs into companies — populated by aggregate.py
+    applicant_company_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("companies.id"))
+    applicant_agent_company_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("companies.id"))
+    builder_company_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("companies.id"))
+    architect_company_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("companies.id"))
+    owner_company_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("companies.id"))
+
+    n_docs: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    n_docs_downloaded: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    total_pages: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    n_information_requests: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    n_amendments: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    n_specialist_reports: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    days_lodge_to_decide: Mapped[int | None] = mapped_column(Integer)
+    first_doc_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    last_doc_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+
+    n_docs_summarised: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="incomplete")
+    aggregated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+
+
+class Company(Base):
+    __tablename__ = "companies"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    acn: Mapped[str | None] = mapped_column(String(9))
+    abn: Mapped[str | None] = mapped_column(String(11))
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    norm_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    entity_type: Mapped[str] = mapped_column(String(20), nullable=False, default="unknown")
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+
+
+class PromptTemplate(Base):
+    __tablename__ = "prompt_templates"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    prompt_version: Mapped[str] = mapped_column(String(20), nullable=False)
+    template_key: Mapped[str] = mapped_column(String(40), nullable=False)
+    system_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    user_template: Mapped[str] = mapped_column(Text, nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text)
+    first_used_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+
+
+class DocumentFeatures(Base):
+    __tablename__ = "document_features"
+
+    document_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("council_application_documents.id"), primary_key=True
+    )
+    analyzed_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    analyzer_version: Mapped[str] = mapped_column(String(20), nullable=False)
+    mime_type: Mapped[str | None] = mapped_column(String(80))
+    page_count: Mapped[int | None] = mapped_column(Integer)
+    total_text_chars: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    mean_chars_per_page: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    has_acroform: Mapped[bool] = mapped_column(default=False)
+    n_text_widgets: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    n_text_widgets_filled: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    n_checkbox_widgets: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    pdf_producer: Mapped[str | None] = mapped_column(String(255))
+    pdf_creator: Mapped[str | None] = mapped_column(String(255))
+    pdf_format: Mapped[str | None] = mapped_column(String(40))
+    treatment: Mapped[str] = mapped_column(String(40), nullable=False)
+    extraction_notes: Mapped[str | None] = mapped_column(Text)
+
+
+class BusinessLink(Base):
+    __tablename__ = "business_links"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    business_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    business_role: Mapped[str] = mapped_column(String(20), nullable=False)
+    url: Mapped[str | None] = mapped_column(String(1024))
+    url_kind: Mapped[str | None] = mapped_column(String(20))
+    search_query: Mapped[str | None] = mapped_column(String(255))
+    search_engine: Mapped[str] = mapped_column(String(20), nullable=False, default="google")
+    confidence: Mapped[str | None] = mapped_column(String(10))
+    candidates_json: Mapped[dict | None] = mapped_column(JSON)
+    discovered_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)

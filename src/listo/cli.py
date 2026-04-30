@@ -21,6 +21,14 @@ enrich_app = typer.Typer(no_args_is_help=True)
 app.add_typer(council_app, name="council")
 app.add_typer(enrich_app, name="enrich")
 
+from listo.property_history.cli import property_app  # noqa: E402
+
+app.add_typer(property_app, name="property")
+
+from listo.da_summaries.cli import da_app  # noqa: E402
+
+app.add_typer(da_app, name="da")
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 

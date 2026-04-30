@@ -1,0 +1,20 @@
+version: v2
+
+# TypeScript codegen for the frontend.
+# Rust codegen is driven by `tonic-build` from `api/build.rs` instead — keeps
+# the Rust build a single `cargo build` with no extra step.
+#
+# `@bufbuild/protoc-gen-es` v2 emits BOTH the message classes and the
+# service descriptors in a single `*_pb.ts` file, so no separate Connect
+# plugin is needed — the `@connectrpc/connect` runtime accepts those
+# descriptors directly.
+
+inputs:
+  - directory: proto
+
+plugins:
+  - remote: buf.build/bufbuild/es:v2.2.5
+    out: web/src/gen
+    opt:
+      - target=ts
+      - import_extension=js

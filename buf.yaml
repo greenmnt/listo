@@ -1,0 +1,21 @@
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+  except:
+    # `Listo` (single root service) on purpose — keeps the Rust trait + TS
+    # client named `Listo` rather than `ListoService`.
+    - SERVICE_SUFFIX
+    # We keep proto/listo.proto rather than proto/listo/v1/listo.proto. One
+    # file, one service; nesting buys nothing here.
+    - PACKAGE_DIRECTORY_MATCH
+    # Reuse short message names (ServerStatus, MapPoint, ProfitOutputs) where
+    # they're more meaningful than `GetStatusResponse` etc.
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
+    - RPC_REQUEST_RESPONSE_UNIQUE
+breaking:
+  use:
+    - FILE

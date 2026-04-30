@@ -33,6 +33,37 @@ _SUFFIX_MAP: dict[str, str] = {
 
 _PUNCT = re.compile(r"[^\w\s/]+")
 _WS = re.compile(r"\s+")
+
+# Reverse of _SUFFIX_MAP — short abbreviation → canonical long form. Used by
+# the Domain scraper / Google searches because Domain's URL slug uses the
+# long form ("parade") whereas REA uses the abbreviation ("pde"). The mapping
+# is built lazily after _SUFFIX_MAP is defined below.
+_LONG_FORM: dict[str, str] = {}
+
+
+def long_form(street_type: str) -> str:
+    """Return the canonical long form of a street-type abbreviation.
+
+    'pde' → 'parade', 'st' → 'street', etc. Unknown / already-long values
+    pass through unchanged.
+    """
+    if not _LONG_FORM:
+        _build_long_form()
+    s = street_type.strip().lower()
+    return _LONG_FORM.get(s, street_type)
+
+
+def _build_long_form() -> None:
+    """Populate _LONG_FORM from _SUFFIX_MAP. The first long-form spelling we
+    see for each abbreviation wins (so 'parade' for 'pde', not 'parad'/etc).
+    """
+    for long, short in _SUFFIX_MAP.items():
+        if long == short:
+            continue  # 'pde' → 'pde'; not a long form
+        # Pick the longest spelling for each short code.
+        existing = _LONG_FORM.get(short)
+        if existing is None or len(long) > len(existing):
+            _LONG_FORM[short] = long
 # A street number with trailing alpha suffix: "11a", "18b", "11abc". In AU
 # property practice this nearly always denotes a half-of-duplex subdivision
 # of the original lot, equivalent to "1/11" / "2/11" notation. Treating the

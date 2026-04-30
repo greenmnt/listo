@@ -1,0 +1,53 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-bg text-text font-sans antialiased;
+    font-feature-settings: "ss01", "cv02", "cv03", "cv04", "cv11";
+  }
+
+  /* Trading-app aesthetic — tabular numbers everywhere they appear in
+     anything that looks like data. */
+  .num,
+  .font-mono {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Custom scrollbars (dark) */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #2a2d35;
+    border-radius: 6px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #3b3f49;
+  }
+}
+
+@layer components {
+  .panel {
+    @apply rounded-2xl bg-panel border border-border/60;
+  }
+
+  .row-hover {
+    @apply hover:bg-white/[0.03] transition-colors;
+  }
+
+  .pill {
+    @apply inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium border;
+  }
+}

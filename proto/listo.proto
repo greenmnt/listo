@@ -1,0 +1,311 @@
+syntax = "proto3";
+
+package listo.v1;
+
+// Single source of truth for the Listo API. Both the Rust backend
+// (tonic + tonic-web) and the TypeScript frontend (@connectrpc/connect-web)
+// generate code from this file. Dates / timestamps are represented as
+// strings to keep the schema self-contained — no google.protobuf.Timestamp
+// import — and so JSON dumps over Connect protocol stay readable.
+//
+// Date format:      YYYY-MM-DD       (ISO 8601)
+// Datetime format:  YYYY-MM-DDTHH:MM:SSZ  (ISO 8601 UTC)
+
+// ---------------------------------------------------------------------------
+// Shared enums
+// ---------------------------------------------------------------------------
+
+enum DaKind {
+  DA_KIND_UNSPECIFIED = 0;
+  DA_KIND_GRANNY = 1;       // 🍏 secondary dwelling
+  DA_KIND_DUPLEX = 2;       // 🏘️ dual occupancy
+  DA_KIND_BIG_DEV = 3;      // 🏗️ multi-unit / 3+ dwellings
+  DA_KIND_OTHER = 4;        // 🏠 single house / OPW / etc.
+}
+
+enum Verdict {
+  VERDICT_UNSPECIFIED = 0;
+  VERDICT_BULL = 1;         // 🐂 strong project
+  VERDICT_GRASSHOPPER = 2;  // 🦗 walk away
+  VERDICT_MARGINAL = 3;     // 🤔 stress-test it
+}
+
+// ---------------------------------------------------------------------------
+// Status — bottom info-bar feed + landing tiles
+// ---------------------------------------------------------------------------
+
+message StatusRequest {}
+
+message ServerStatus {
+  int64 apps_total = 1;
+  int64 apps_with_detail = 2;
+  int64 apps_with_docs = 3;
+  int64 docs_total = 4;
+  int64 docs_downloaded = 5;
+  int64 docs_total_bytes = 6;
+  optional LatestScrape latest_scrape = 7;
+  optional double current_var_rate_pct = 8;
+  string server_time = 9;   // ISO 8601 datetime, UTC
+}
+
+message LatestScrape {
+  string council_slug = 1;
+  string backend_name = 2;
+  string date_from = 3;
+  string date_to = 4;
+  string status = 5;
+  string started_at = 6;
+  optional string finished_at = 7;
+  int32 apps_yielded = 8;
+  int32 files_downloaded = 9;
+}
+
+// ---------------------------------------------------------------------------
+// Applications — list + detail
+// ---------------------------------------------------------------------------
+
+message ListApplicationsRequest {
+  // "granny" | "duplex" | "big_dev" | "other" | "all" (or unset → all)
+  optional string kind = 1;
+  optional string suburb = 2;
+  optional string type_code = 3;
+  optional string date_from = 4;
+  optional string date_to = 5;
+  optional string q = 6;          // free-text search across description/address/app_id
+  optional uint32 limit = 7;      // 1..=500, default 50
+  optional uint32 offset = 8;
+}
+
+message ListApplicationsResponse {
+  repeated Application items = 1;
+}
+
+message GetApplicationRequest {
+  string council_slug = 1;
+  string application_id = 2;
+}
+
+message Application {
+  int64 id = 1;
+  string council_slug = 2;
+  string application_id = 3;
+  DaKind kind = 4;
+  optional string type_code = 5;
+  optional string application_type = 6;
+  optional string status = 7;
+  optional string decision_outcome = 8;
+  optional string lodged_date = 9;
+  optional string decision_date = 10;
+  optional int32 approved_units = 11;
+  optional string raw_address = 12;
+  optional string suburb = 13;
+  optional string postcode = 14;
+  optional string description = 15;
+  optional string application_url = 16;
+
+  // Populated from da_summaries when the LLM has processed this DA.
+  optional DaInsight insight = 17;
+
+  // Populated from domain_sales when at least one sale event is on file.
+  optional SaleStory sale_story = 18;
+}
+
+// LLM-extracted facts + DA-process stats. Only present once the
+// `listo da summarise` + `listo da aggregate` pipeline has run for this
+// application. All fields are optional because the source DA may have
+// only the basics.
+message DaInsight {
+  optional string applicant_name = 1;
+  optional string applicant_acn = 2;
+  optional string applicant_entity_type = 3;
+  optional string applicant_agent_name = 4;
+  optional string builder_name = 5;
+  optional string architect_name = 6;
+  optional int32 dwelling_count = 7;
+  optional string dwelling_kind = 8;     // 'duplex' / 'granny' / etc.
+  optional string project_description = 9;
+  optional string lot_on_plan = 10;
+  string status = 11;                    // 'complete' | 'incomplete' | 'escalated'
+  // DA-process stats
+  int32 n_docs = 12;
+  int32 n_information_requests = 13;
+  int32 n_amendments = 14;
+  optional int64 total_bytes = 15;
+  optional int32 days_lodge_to_decide = 16;
+}
+
+// Aggregated sales-history view over the same lot. Pre = the developer's
+// purchase (the sale immediately before the DA was lodged). Post = the
+// total revenue from selling each unit after the build.
+message SaleStory {
+  optional int64 pre_price = 1;          // AUD, single most recent sale before lodged_date
+  optional string pre_date = 2;          // ISO date
+  optional string pre_source = 3;        // 'domain' | 'realestate'
+  optional int64 post_total = 4;         // sum of unit sales after decision_date
+  optional int32 n_post_sales = 5;
+  optional int64 gross_spread = 6;       // post_total − pre_price (computed when both present)
+  // Each post-build unit's most recent sale. UI uses this to show
+  // '1/124 sold $1.9m, 2/124 sold $1.85m' alongside a 'X / Y units sold' percent.
+  repeated UnitSale unit_sales = 7;
+}
+
+message UnitSale {
+  string unit_number = 1;                // '1', '2', '1A', etc.
+  string display_address = 2;            // e.g. '1/124 Sunshine Parade, Miami QLD 4220'
+  optional int64 sold_price = 3;
+  optional string sold_date = 4;
+}
+
+message ApplicationDetail {
+  Application base = 1;
+  string vendor = 2;
+  optional string applicant_name = 3;
+  optional string builder_name = 4;
+  optional string architect_name = 5;
+  optional string owner_name = 6;
+  optional string internal_property_id = 7;
+  optional string lot_on_plan = 8;
+  optional string list_first_seen_at = 9;
+  optional string detail_fetched_at = 10;
+  optional string docs_fetched_at = 11;
+  repeated Document documents = 12;
+}
+
+message Document {
+  int64 id = 1;
+  optional string doc_oid = 2;
+  optional string doc_type = 3;
+  optional string title = 4;
+  optional string source_url = 5;
+  optional string mime_type = 6;
+  optional int64 file_size = 7;
+  optional int32 page_count = 8;
+  optional string published_at = 9;
+  optional string downloaded_at = 10;
+  bool has_file = 11;
+}
+
+// ---------------------------------------------------------------------------
+// Stats — leaderboard + monthly trend
+// ---------------------------------------------------------------------------
+
+message SuburbStatsRequest {
+  optional string kind = 1;
+  optional uint32 limit = 2;   // default 40
+}
+
+message SuburbStatsResponse {
+  repeated SuburbStat items = 1;
+}
+
+message SuburbStat {
+  string suburb = 1;
+  int64 n_total = 2;
+  int64 n_kind = 3;
+  int64 n_last_30d = 4;
+  int64 n_prev_30d = 5;
+}
+
+message TrendStatsRequest {
+  optional string suburb = 1;
+  optional string date_from = 2;
+  optional string date_to = 3;
+}
+
+message TrendStatsResponse {
+  repeated TrendBucket buckets = 1;
+}
+
+message TrendBucket {
+  string bucket_start = 1;
+  int64 n_granny = 2;
+  int64 n_duplex = 3;
+  int64 n_big_dev = 4;
+  int64 n_other = 5;
+  int64 n_approved = 6;
+  int64 n_total = 7;
+}
+
+// ---------------------------------------------------------------------------
+// Map — coloured dots
+// ---------------------------------------------------------------------------
+
+message MapRequest {
+  optional string kind = 1;
+  optional string suburb = 2;
+  optional uint32 limit = 3;   // default 2000, max 5000
+}
+
+message MapResponse {
+  repeated MapPoint points = 1;
+}
+
+message MapPoint {
+  string application_id = 1;
+  string council_slug = 2;
+  DaKind kind = 3;
+  double lat = 4;
+  double lng = 5;
+  optional string suburb = 6;
+  optional string status = 7;
+  optional string decision_outcome = 8;
+  optional int32 approved_units = 9;
+  optional string raw_address = 10;
+}
+
+// ---------------------------------------------------------------------------
+// Rates — RBA F5 latest snapshot
+// ---------------------------------------------------------------------------
+
+message CurrentRatesRequest {}
+
+message CurrentRates {
+  optional double variable_oo_pct = 1;
+  optional double variable_inv_pct = 2;
+  optional double fixed_3yr_oo_pct = 3;
+  optional double fixed_3yr_inv_pct = 4;
+  optional string as_of_month = 5;
+}
+
+// ---------------------------------------------------------------------------
+// Profitability — calculator
+// ---------------------------------------------------------------------------
+
+message CalcProfitabilityRequest {
+  double purchase_price = 1;
+  double build_cost = 2;
+  double hold_months = 3;
+  double sale_price = 4;
+  optional double rate_pct = 5;
+  optional double acquisition_costs_pct = 6;   // default 5.5
+  optional double sale_costs_pct = 7;          // default 2.5
+}
+
+message ProfitOutputs {
+  double rate_pct_used = 1;
+  double acquisition_cost = 2;
+  double interest_cost = 3;
+  double sale_cost = 4;
+  double total_cost = 5;
+  double profit = 6;
+  double margin_pct = 7;
+  double annualised_return_pct = 8;
+  double breakeven_sale_price = 9;
+  Verdict verdict = 10;
+  string verdict_reason = 11;
+}
+
+// ---------------------------------------------------------------------------
+// Service
+// ---------------------------------------------------------------------------
+
+service Listo {
+  rpc GetStatus(StatusRequest) returns (ServerStatus);
+  rpc ListApplications(ListApplicationsRequest) returns (ListApplicationsResponse);
+  rpc GetApplication(GetApplicationRequest) returns (ApplicationDetail);
+  rpc SuburbStats(SuburbStatsRequest) returns (SuburbStatsResponse);
+  rpc TrendStats(TrendStatsRequest) returns (TrendStatsResponse);
+  rpc MapPoints(MapRequest) returns (MapResponse);
+  rpc GetCurrentRates(CurrentRatesRequest) returns (CurrentRates);
+  rpc CalcProfitability(CalcProfitabilityRequest) returns (ProfitOutputs);
+}
