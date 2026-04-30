@@ -226,11 +226,12 @@ export default function ProjectsPage() {
                   <thead className="text-[11px] uppercase tracking-wide text-muted/80 sticky top-0 bg-panel">
                     <tr className="text-center border-b border-border/40">
                       <th className="px-3 py-2.5 font-medium border-x border-border/30">Kind</th>
-                      <th className="px-3 py-2.5 font-medium border-r border-border/30">Site cost</th>
+                      <th className="px-3 py-2.5 font-medium border-r border-border/30">Site cost ($m)</th>
+                      <th className="px-3 py-2.5 font-medium border-r border-border/30">Site m²</th>
                       <th className="px-3 py-2.5 font-medium border-r border-border/30">Site sold</th>
                       <th className="px-3 py-2.5 font-medium border-r border-border/30">Site</th>
                       <th className="px-3 py-2.5 font-medium border-r border-border/30">Suburb</th>
-                      <th className="px-3 py-2.5 font-medium border-r border-border/30">PC</th>
+                      <th className="px-3 py-2.5 font-medium border-r border-border/30">Postcode</th>
                       <th className="px-3 py-2.5 font-medium border-r border-border/30">Developer</th>
                       <th className="px-3 py-2.5 font-medium border-r border-border/30">Δ Supply</th>
                       <th className="px-3 py-2.5 font-medium border-r border-border/30">Timeline</th>
@@ -289,6 +290,35 @@ function streetOnly(rawAddress: string | undefined): string {
 const cellBase =
   "px-3 py-2 border-r border-border/30 align-middle";
 
+// Deterministic per-suburb colour. Same suburb always gets the same
+// class so a sorted/filtered list visually clusters by suburb. All
+// classes are written out as literals so Tailwind's content scanner
+// picks them up.
+const SUBURB_COLOURS = [
+  "text-amber-300",
+  "text-emerald-300",
+  "text-sky-300",
+  "text-pink-300",
+  "text-violet-300",
+  "text-rose-300",
+  "text-lime-300",
+  "text-teal-300",
+  "text-orange-300",
+  "text-fuchsia-300",
+  "text-indigo-300",
+  "text-yellow-300",
+  "text-cyan-300",
+  "text-red-300",
+  "text-green-300",
+  "text-blue-300",
+];
+
+function suburbColor(suburb: string | null | undefined): string {
+  if (!suburb) return "text-muted";
+  const h = fnv1a(suburb.toLowerCase().trim());
+  return SUBURB_COLOURS[h % SUBURB_COLOURS.length];
+}
+
 function ProjectRow({ a }: { a: Application }) {
   const insight = a.insight;
   const sale = a.saleStory;
@@ -300,9 +330,24 @@ function ProjectRow({ a }: { a: Application }) {
         <div className="flex justify-center"><KindBadge kind={a.kind} /></div>
       </td>
 
-      {/* Site cost */}
-      <td className={cx(cellBase, "text-right whitespace-nowrap font-mono num text-sm")}>
-        {sale?.prePrice ? audCompact(Number(sale.prePrice)) : <span className="text-muted text-xs">—</span>}
+      {/* Site cost (millions, just the number — header has the $m unit) */}
+      <td className={cx(cellBase, "text-center whitespace-nowrap font-mono num text-sm")}>
+        {sale?.prePrice ? (
+          (Number(sale.prePrice) / 1_000_000).toFixed(2)
+        ) : (
+          <span className="text-muted text-xs">—</span>
+        )}
+      </td>
+
+      {/* Site m² */}
+      <td className={cx(cellBase, "text-center whitespace-nowrap font-mono num text-sm")}>
+        {sale?.siteAreaM2 ? (
+          <>
+            {num(sale.siteAreaM2)}
+          </>
+        ) : (
+          <span className="text-muted text-xs">—</span>
+        )}
       </td>
 
       {/* Site sold (month + year) */}
@@ -321,17 +366,16 @@ function ProjectRow({ a }: { a: Application }) {
         </Link>
       </td>
 
-      {/* Suburb (ALL CAPS) */}
-      <td className={cx(cellBase, "whitespace-nowrap text-center text-sm font-medium tracking-wide")}>
+      {/* Suburb + Postcode share a deterministic per-suburb colour so
+          rows in the same suburb visually cluster. */}
+      <td className={cx(cellBase, "whitespace-nowrap text-center text-sm font-medium tracking-wide", suburbColor(a.suburb))}>
         {a.suburb ? a.suburb.toUpperCase() : <span className="text-muted text-xs">—</span>}
       </td>
-
-      {/* Postcode */}
-      <td className={cx(cellBase, "whitespace-nowrap text-center font-mono num text-xs text-muted")}>
+      <td className={cx(cellBase, "whitespace-nowrap text-center font-mono num text-sm", suburbColor(a.suburb))}>
         {a.postcode ?? "—"}
       </td>
 
-      {/* Developer — codename */}
+      {/* Developer — codename in hot pink */}
       <td className={cx(cellBase, "max-w-[200px] text-center")}>
         {insight?.applicantName ? (
           <ApplicantCell insight={insight} />
@@ -429,7 +473,7 @@ function ApplicantCell({ insight }: { insight: DaInsight }) {
     .filter(Boolean)
     .join(" · ");
   return (
-    <span className="text-sm text-text font-mono" title={tooltip}>
+    <span className="text-sm font-mono text-pink-400 font-semibold" title={tooltip}>
       {name}
     </span>
   );

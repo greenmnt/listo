@@ -12,7 +12,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
-PROMPT_VERSION = "v2"
+PROMPT_VERSION = "v3"
 
 
 class DwellingKind(StrEnum):

@@ -147,6 +147,8 @@ message SaleStory {
   // Each post-build unit's most recent sale. UI uses this to show
   // '1/124 sold $1.9m, 2/124 sold $1.85m' alongside a 'X / Y units sold' percent.
   repeated UnitSale unit_sales = 7;
+  // Lot land area from the matched parent property record (Domain).
+  optional int32 site_area_m2 = 8;
 }
 
 message UnitSale {

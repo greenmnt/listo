@@ -42,17 +42,21 @@ pub async fn list(
                 ds.n_amendments        AS llm_n_amendments,
                 ds.total_bytes         AS llm_total_bytes,
                 ds.days_lodge_to_decide AS llm_days_lodge_to_decide,
+                (SELECT MAX(dp.land_area_m2)
+                   FROM domain_properties dp
+                  WHERE dp.display_address LIKE CONCAT(ds.street_address, '%')
+                    AND dp.unit_number = '')                                          AS site_area_m2,
                 (SELECT MAX(s.event_price)
                    FROM domain_sales s
                    JOIN domain_properties dp ON dp.id = s.domain_property_id
-                  WHERE dp.display_address = ds.street_address
+                  WHERE dp.display_address LIKE CONCAT(ds.street_address, '%')
                     AND s.event_date < ca.lodged_date
                     AND s.is_sold = 1
                     AND s.event_price IS NOT NULL)                                  AS pre_price,
                 (SELECT s.event_date
                    FROM domain_sales s
                    JOIN domain_properties dp ON dp.id = s.domain_property_id
-                  WHERE dp.display_address = ds.street_address
+                  WHERE dp.display_address LIKE CONCAT(ds.street_address, '%')
                     AND s.event_date < ca.lodged_date
                     AND s.is_sold = 1
                     AND s.event_price IS NOT NULL
@@ -64,7 +68,7 @@ pub async fn list(
                    JOIN domain_properties unit ON unit.id = s.domain_property_id
                   WHERE unit.unit_number <> ''
                     AND EXISTS (SELECT 1 FROM domain_properties parent
-                                 WHERE parent.display_address = ds.street_address
+                                 WHERE parent.display_address LIKE CONCAT(ds.street_address, '%')
                                    AND parent.street_number = unit.street_number
                                    AND parent.street_name   = unit.street_name
                                    AND parent.suburb        = unit.suburb
@@ -77,7 +81,7 @@ pub async fn list(
                    JOIN domain_properties unit ON unit.id = s.domain_property_id
                   WHERE unit.unit_number <> ''
                     AND EXISTS (SELECT 1 FROM domain_properties parent
-                                 WHERE parent.display_address = ds.street_address
+                                 WHERE parent.display_address LIKE CONCAT(ds.street_address, '%')
                                    AND parent.street_number = unit.street_number
                                    AND parent.street_name   = unit.street_name
                                    AND parent.suburb        = unit.suburb
@@ -196,7 +200,7 @@ async fn enrich_unit_sales(
           WHERE ca.id IN ({placeholders})
             AND latest.sold_date > ca.decision_date
             AND EXISTS (SELECT 1 FROM domain_properties parent
-                         WHERE parent.display_address = ds.street_address
+                         WHERE parent.display_address LIKE CONCAT(ds.street_address, '%')
                            AND parent.street_number = unit.street_number
                            AND parent.street_name   = unit.street_name
                            AND parent.suburb        = unit.suburb
@@ -404,6 +408,8 @@ fn build_sale_story(r: &MySqlRow) -> Option<pb::SaleStory> {
         _ => None,
     };
 
+    let site_area_m2_u: Option<u32> = r.try_get("site_area_m2").ok();
+
     Some(pb::SaleStory {
         pre_price,
         pre_date: pre_date.map(|d| d.format("%Y-%m-%d").to_string()),
@@ -412,5 +418,6 @@ fn build_sale_story(r: &MySqlRow) -> Option<pb::SaleStory> {
         n_post_sales: Some(n_post_sales),
         gross_spread,
         unit_sales: vec![],   // populated by enrich_unit_sales() in a 2nd pass
+        site_area_m2: site_area_m2_u.map(|v| v as i32),
     })
 }

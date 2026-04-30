@@ -217,6 +217,60 @@ If the field doesn't contain that piece (e.g. no ACN stated), use null \
 for ACN/ABN and 'unknown' for entity_type."""
 
 
+# v3 system prompt: same as v2 but the worked-example uses placeholder syntax
+# instead of a real applicant name. The v2 example ("Great Southern Men
+# Developments Pty Ltd ... c/- HPC Planning") is a real Gold Coast applicant
+# from EDA/2021/97, and the 3B model — when fed sparse text (like a Plans PDF
+# title-block) — was copying it verbatim into other DAs' applicant_name.
+# Switched to abstract <PLACEHOLDER> syntax + an explicit "do not invent
+# real-sounding names" instruction.
+SYSTEM_PROMPT_V3 = SYSTEM_PROMPT_V1 + """
+
+ENTITY PARSING RULES (Australian conventions — applies to applicant_name, \
+applicant_acn, applicant_abn, applicant_entity_type, applicant_agent_name, \
+owner_name, owner_acn, owner_abn, owner_entity_type):
+
+A typical applicant string looks like:
+  '<ENTITY_NAME> Pty Ltd (A.C.N <NINE DIGITS>) c/- <AGENT_NAME>'
+
+Parse this into separate fields as follows:
+
+1. The PRIMARY ENTITY ends at its company-suffix marker. Common suffixes:
+   - 'Pty Ltd' / 'Pty. Ltd.' / 'Pty Limited'  → entity_type = 'company'
+   - 'Limited' / 'Ltd'                         → entity_type = 'company'
+   - 'Inc' / 'Inc.' / 'Corporation' / 'Corp'   → entity_type = 'company'
+   Include the suffix in the *_name field — keep the entity exactly as \
+written in the document.
+
+2. ACN (Australian Company Number) is 9 digits, often shown as
+   '(A.C.N <9 digits>)' or 'ACN: <9 digits>' or 'ACN <3>-<3>-<3>'.
+   Extract DIGITS ONLY (no spaces, no hyphens, no parentheses) into \
+applicant_acn / owner_acn.
+
+3. ABN (Australian Business Number) is 11 digits, often 'ABN <2> <3> <3> <3>'.
+   Extract DIGITS ONLY into applicant_abn / owner_abn.
+
+4. The 'c/-' marker (also written 'C/-' or 'care of') introduces a
+   LODGING AGENT — a separate consultancy (often a town planner) that
+   submitted the DA on behalf of the applicant. Their name goes in
+   applicant_agent_name (NOT in applicant_name).
+
+5. entity_type rules:
+   - Has 'Pty Ltd' / 'Limited' / 'Inc' / etc.  → 'company'
+   - Has 'ATF' (As Trustee For) / 'As Trustee For' / 'Family Trust' / \
+'The <Name> Trust' → 'trust'
+   - Two or more personal names joined by 'and' / '&' → 'individual'
+     (preserve them all in the name field, including any joined trust e.g. \
+trust-plus-individuals as written in the document)
+   - Plain 'Mr/Mrs/Ms/Dr Firstname Lastname'  → 'individual'
+   - Cannot tell                              → 'unknown'
+
+CRITICAL: The placeholders above (<ENTITY_NAME>, <AGENT_NAME>, <NINE DIGITS>, \
+etc.) are syntax illustrations only. NEVER copy them into your output, and \
+NEVER substitute a plausible-sounding real name for a placeholder. If the \
+document does not state a field, use null. Do not guess from training data."""
+
+
 # (prompt_version, template_key) -> Template
 TEMPLATES: dict[tuple[str, str], Template] = {
     # v1 retained as historical record. New runs use v2 (set by
@@ -271,6 +325,33 @@ TEMPLATES: dict[tuple[str, str], Template] = {
     ("v2", "generic"): Template(
         "generic", SYSTEM_PROMPT_V2, _USER_GENERIC_V1,
         "v2: + entity parsing",
+    ),
+    # v3 — same user templates as v2, system prompt rewritten to remove the
+    # 'Great Southern Men Developments' worked example (which the 3B model
+    # was copying verbatim into unrelated DAs).
+    ("v3", "da_form_1"): Template(
+        "da_form_1", SYSTEM_PROMPT_V3, _USER_DA_FORM_1_V1,
+        "v3: example placeholders + 'do not invent names' guard",
+    ),
+    ("v3", "decision_notice"): Template(
+        "decision_notice", SYSTEM_PROMPT_V3, _USER_DECISION_NOTICE_V1,
+        "v3: example placeholders + 'do not invent names' guard",
+    ),
+    ("v3", "specialist"): Template(
+        "specialist", SYSTEM_PROMPT_V3, _USER_SPECIALIST_V1,
+        "v3: example placeholders + 'do not invent names' guard",
+    ),
+    ("v3", "plans"): Template(
+        "plans", SYSTEM_PROMPT_V3, _USER_PLANS_V1,
+        "v3: example placeholders + 'do not invent names' guard",
+    ),
+    ("v3", "supporting"): Template(
+        "supporting", SYSTEM_PROMPT_V3, _USER_SUPPORTING_V1,
+        "v3: example placeholders + 'do not invent names' guard",
+    ),
+    ("v3", "generic"): Template(
+        "generic", SYSTEM_PROMPT_V3, _USER_GENERIC_V1,
+        "v3: example placeholders + 'do not invent names' guard",
     ),
 }
 

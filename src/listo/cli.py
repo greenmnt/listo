@@ -193,6 +193,222 @@ def council_coverage(
         )
 
 
+def _iter_months(start: date, end: date) -> list[tuple[date, date]]:
+    """Return [(first-of-month, last-of-month), ...] inclusive."""
+    out: list[tuple[date, date]] = []
+    y, m = start.year, start.month
+    while True:
+        first = date(y, m, 1)
+        if first > end:
+            break
+        if m == 12:
+            last = date(y, 12, 31)
+        else:
+            last = date(y, m + 1, 1) - timedelta(days=1)
+        out.append((first, last))
+        if m == 12:
+            y, m = y + 1, 1
+        else:
+            m += 1
+    return out
+
+
+def _month_completed(slug: str, first: date, last: date) -> dict | None:
+    """If a council_scrape_windows row already has status='completed' for
+    exactly this month boundary, return a dict with its stats. Otherwise
+    None.
+    """
+    with session_scope() as s:
+        row = s.execute(text("""
+            SELECT id, status, apps_yielded, files_downloaded, finished_at
+              FROM council_scrape_windows
+             WHERE council_slug = :slug
+               AND date_from = :df
+               AND date_to = :dt
+               AND status = 'completed'
+             ORDER BY finished_at DESC
+             LIMIT 1
+        """), {"slug": slug, "df": first.isoformat(), "dt": last.isoformat()}).fetchone()
+    return dict(row._mapping) if row else None
+
+
+@council_app.command("scrape-monthly")
+def council_scrape_monthly(
+    slug: str = typer.Argument(..., help="council slug (e.g. cogc, newcastle)"),
+    date_from: str = typer.Option(..., "--from", help="start month YYYY-MM-01"),
+    date_to: str = typer.Option(..., "--to", help="end month YYYY-MM-DD (inclusive)"),
+    list_only: bool = typer.Option(False, "--list-only"),
+    detail_only: bool = typer.Option(False, "--detail-only"),
+    docs_only: bool = typer.Option(False, "--docs-only"),
+    detail_limit: int = typer.Option(0, "--detail-limit"),
+    docs_limit: int = typer.Option(0, "--docs-limit"),
+    worker_index: int = typer.Option(0, "--worker-index", help="0-based partition index for this worker"),
+    worker_count: int = typer.Option(1, "--worker-count", help="total parallel workers splitting the months"),
+    force: bool = typer.Option(False, "--force", help="re-scrape months already marked completed"),
+) -> None:
+    """Iterate the date range one month at a time, skipping months already
+    marked `completed` in council_scrape_windows. Each month is its own
+    scrape attempt — clean failure boundaries, clean resume, easy
+    'which months are done?' query.
+
+    Run multiple parallel workers (same machine OR different machines) by
+    setting --worker-index / --worker-count. Each worker takes months
+    where (month_index % count == index). Disjoint sets, no claim
+    contention.
+    """
+    from listo.councils.orchestrator import run_council
+    from listo.councils.registry import get_council
+
+    council = get_council(slug)
+    df = date.fromisoformat(date_from)
+    dt_to = date.fromisoformat(date_to)
+    months = _iter_months(df, dt_to)
+
+    do_list = not (detail_only or docs_only)
+    do_detail = not (list_only or docs_only)
+    do_docs = not (list_only or detail_only)
+
+    typer.echo(
+        f"scraping {council.name} ({slug}) {len(months)} month(s) "
+        f"worker {worker_index}/{worker_count}  "
+        f"phases: list={do_list} detail={do_detail} docs={do_docs}"
+    )
+
+    n_done = 0
+    n_skipped = 0
+    n_failed = 0
+    for idx, (first, last) in enumerate(months):
+        if idx % worker_count != worker_index:
+            continue
+        existing = _month_completed(slug, first, last) if not force else None
+        if existing:
+            typer.secho(
+                f"  [{first.strftime('%Y-%m')}] ✓ already completed "
+                f"({existing['apps_yielded']} apps, {existing['files_downloaded']} files)",
+                fg=typer.colors.GREEN,
+            )
+            n_skipped += 1
+            continue
+
+        typer.echo(f"  [{first.strftime('%Y-%m')}] running…")
+        try:
+            stats = run_council(
+                council, date_from=first, date_to=last,
+                do_list=do_list, do_detail=do_detail, do_docs=do_docs,
+                detail_limit=detail_limit or None,
+                docs_limit=docs_limit or None,
+            )
+            typer.secho(
+                f"  [{first.strftime('%Y-%m')}] ✓ done — list:{stats['list']} "
+                f"detail:{stats['detail']} docs:{stats['docs']} files:{stats['doc_files']}",
+                fg=typer.colors.GREEN,
+            )
+            n_done += 1
+        except Exception as exc:  # noqa: BLE001
+            typer.secho(
+                f"  [{first.strftime('%Y-%m')}] ✗ FAILED: {exc}",
+                fg=typer.colors.RED,
+            )
+            n_failed += 1
+            # Don't bail — keep walking months so a transient hiccup
+            # doesn't block the rest of the backfill.
+
+    typer.echo("")
+    typer.echo(f"summary: {n_done} done, {n_skipped} already-completed, {n_failed} failed")
+
+
+@council_app.command("months")
+def council_months(
+    slug: str = typer.Argument(..., help="council slug"),
+    date_from: str = typer.Option(None, "--from", help="start month YYYY-MM-01 (default: earliest in db)"),
+    date_to: str = typer.Option(None, "--to", help="end month YYYY-MM-DD (default: today)"),
+) -> None:
+    """Per-month visualisation of scrape progress.
+
+    Shows for every month in the range:
+      ✓ COMPLETED — has a council_scrape_windows row with status='completed'
+      … RUNNING — has a 'running' row but no completed yet
+      ✗ FAILED — has a 'failed' row but no completed
+      ○ PENDING — no scrape attempt for this exact month boundary
+
+    Plus per-month app + doc counts so partial coverage is obvious.
+    """
+    today = date.today()
+    if not date_from:
+        with session_scope() as s:
+            row = s.execute(text("""
+                SELECT MIN(lodged_date) AS lo FROM council_applications WHERE council_slug = :slug
+            """), {"slug": slug}).fetchone()
+        df = (row.lo if row and row.lo else today).replace(day=1)
+    else:
+        df = date.fromisoformat(date_from)
+    dt_to = date.fromisoformat(date_to) if date_to else today
+    months = _iter_months(df, dt_to)
+
+    # One round-trip: pull all relevant scrape_windows + per-month app counts.
+    with session_scope() as s:
+        windows = s.execute(text("""
+            SELECT date_from, date_to, status, apps_yielded, files_downloaded
+              FROM council_scrape_windows
+             WHERE council_slug = :slug
+               AND date_from BETWEEN :lo AND :hi
+        """), {"slug": slug, "lo": df.isoformat(), "hi": dt_to.isoformat()}).fetchall()
+        counts = s.execute(text("""
+            SELECT YEAR(lodged_date) AS y,
+                   MONTH(lodged_date) AS m,
+                   COUNT(*) AS apps,
+                   SUM(detail_fetched_at IS NOT NULL) AS det,
+                   SUM(docs_fetched_at  IS NOT NULL) AS docs
+              FROM council_applications
+             WHERE council_slug = :slug
+               AND lodged_date BETWEEN :lo AND :hi
+             GROUP BY y, m
+        """), {"slug": slug, "lo": df.isoformat(), "hi": dt_to.isoformat()}).fetchall()
+
+    # Index by exact (date_from, date_to). For "month" rows we keep the
+    # most relevant status: completed > running > failed > pending.
+    STATUS_RANK = {"completed": 3, "running": 2, "failed": 1, "aborted": 0}
+    by_window: dict[tuple[date, date], dict] = {}
+    for w in windows:
+        key = (w.date_from, w.date_to)
+        cur = by_window.get(key)
+        if cur is None or STATUS_RANK.get(w.status, -1) > STATUS_RANK.get(cur["status"], -1):
+            by_window[key] = {"status": w.status, "apps": w.apps_yielded or 0, "files": w.files_downloaded or 0}
+
+    counts_by_month = {(row.y, row.m): row for row in counts}
+
+    # Drop any broad-window status — only per-month completion is
+    # authoritative. We've seen broad scrapes report 'completed' while
+    # actually missing months in the middle (rate-limit truncations etc.).
+    typer.echo(
+        f"{'month':<8} {'status':<11} {'apps':>5} {'detail':>6} {'docs':>5}"
+    )
+    for first, last in months:
+        info = by_window.get((first, last))
+
+        if info is None:
+            badge = typer.style("○ pending  ", fg=typer.colors.WHITE, dim=True)
+        elif info["status"] == "completed":
+            badge = typer.style("✓ completed", fg=typer.colors.GREEN)
+        elif info["status"] == "running":
+            badge = typer.style("… running  ", fg=typer.colors.YELLOW)
+        elif info["status"] == "failed":
+            badge = typer.style("✗ failed   ", fg=typer.colors.RED)
+        else:
+            badge = typer.style(f"? {info['status']:<9}", fg=typer.colors.WHITE)
+
+        # Per-month app/doc/detail counts — always shown, regardless of
+        # window status. This is the real evidence of what's in the db.
+        c = counts_by_month.get((first.year, first.month))
+        apps_str = f"{int(c.apps):>5}" if c else "    —"
+        det_str = f"{int(c.det or 0):>6}" if c else "     —"
+        docs_str = f"{int(c.docs or 0):>5}" if c else "    —"
+
+        typer.echo(
+            f"{first.strftime('%Y-%m')}  {badge} {apps_str} {det_str} {docs_str}"
+        )
+
+
 @council_app.command("resume")
 def council_resume(
     slug: str = typer.Argument(..., help="council slug"),

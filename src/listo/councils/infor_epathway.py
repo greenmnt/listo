@@ -1185,9 +1185,17 @@ def _select_download_indices(n_docs: int) -> set[int]:
     list) that the scraper should actually download. Default policy:
     the first and the last — i.e. the application bundle and the most
     recent amendment/decision. For 1 doc, just that one. For 0, none.
+
+    Override with `LISTO_DOWNLOAD_ALL=1` to download every doc — useful
+    when a specific DA needs full coverage for LLM extraction. Don't set
+    that for the bulk backfill: pulling every plan/specialist-report PDF
+    explodes disk usage.
     """
     if n_docs <= 0:
         return set()
+    import os
+    if os.environ.get("LISTO_DOWNLOAD_ALL") == "1":
+        return set(range(n_docs))
     if n_docs == 1:
         return {0}
     return {0, n_docs - 1}
