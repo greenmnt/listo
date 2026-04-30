@@ -9,6 +9,7 @@ from sqlalchemy import text as sql_text
 
 from listo.db import session_scope
 from listo.da_summaries import aggregate as agg_mod
+from listo.da_summaries import builtcheck as built_mod
 from listo.da_summaries import businesses as biz_mod
 from listo.da_summaries import escalate as esc_mod
 from listo.da_summaries import features as feat_mod
@@ -107,6 +108,34 @@ def features(
     typer.echo(f"  docs skipped (no text): {stats.docs_skipped_no_text}")
     typer.echo(f"  chunks processed:       {stats.chunks_processed}")
     typer.echo(f"  chunks failed:          {stats.chunks_failed}")
+
+
+# ---------- check-built ----------
+
+
+@da_app.command("check-built")
+def check_built(
+    slug: str = typer.Option(None, "--slug"),
+    app_id: str = typer.Option(None, "--app-id"),
+    min_age_months: int = typer.Option(6, "--min-age-months", help="skip DAs decided more recently than N months ago"),
+    redo: bool = typer.Option(False, "--redo", help="re-search even if discovered_urls already has entries for this address"),
+) -> None:
+    """Phase X: Google-search unit-prefixed addresses to detect duplexes
+    that were built but never went on the market for sale (held / rented).
+
+    For each approved DA without post-decision sales, search for
+    `<unit>/<street>` on realestate.com.au and domain.com.au. Hits land
+    in `discovered_urls` so the API can compute built_status.
+    """
+    stats = built_mod.run(
+        council_slug=slug, app_id_str=app_id,
+        min_age_months=min_age_months, redo=redo,
+    )
+    typer.echo("")
+    typer.echo(f"  apps visited:           {stats.apps_visited}")
+    typer.echo(f"  apps skipped (no addr): {stats.apps_skipped_no_address}")
+    typer.echo(f"  queries run:            {stats.queries_run}")
+    typer.echo(f"  units with evidence:    {stats.units_with_evidence}")
 
 
 # ---------- aggregate ----------

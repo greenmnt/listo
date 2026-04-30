@@ -3,7 +3,6 @@ import { useQuery } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../lib/client";
 import KindBadge from "../components/KindBadge";
-import StatusPill from "../components/StatusPill";
 import EmptyState from "../components/EmptyState";
 import { KIND_FILTER_OPTIONS } from "../lib/kinds";
 import { audCompact, cx, num, pct } from "../lib/format";
@@ -107,54 +106,9 @@ export default function ProjectsPage() {
         ))}
       </section>
 
-      <div className="grid grid-cols-1 xl:grid-cols-5 gap-4">
-        {/* Trending suburbs leaderboard */}
-        <section className="panel xl:col-span-1 self-start">
-          <header className="px-4 py-3 border-b border-border/60">
-            <h2 className="text-xs font-semibold tracking-wide uppercase text-muted">
-              🔥 Trending suburbs
-            </h2>
-          </header>
-          <div className="divide-y divide-border/40">
-            {suburbs.data?.items.length === 0 && (
-              <EmptyState
-                emoji="🌱"
-                title="No suburb stats yet"
-                hint="Trending data appears once the scraper has indexed at least a few months of DAs."
-              />
-            )}
-            {suburbs.data?.items.slice(0, 12).map((s, i) => {
-              const last = Number(s.nLast30d);
-              const prev = Number(s.nPrev30d);
-              const delta = last - prev;
-              const trendEmoji = delta > 0 ? "📈" : delta < 0 ? "📉" : "➡️";
-              const trendClass =
-                delta > 0 ? "text-good" : delta < 0 ? "text-bad" : "text-muted";
-              return (
-                <Link
-                  key={s.suburb}
-                  to={`/?suburb=${encodeURIComponent(s.suburb)}`}
-                  className="row-hover flex items-center gap-2 px-3 py-2 text-xs"
-                >
-                  <span className="w-4 text-muted num text-right">{i + 1}</span>
-                  <span className="flex-1 truncate" title={titleCase(s.suburb)}>
-                    {titleCase(s.suburb)}
-                  </span>
-                  <span className="font-mono num text-text w-7 text-right">
-                    {num(s.nKind)}
-                  </span>
-                  <span className={cx("font-mono num w-10 text-right", trendClass)}>
-                    {trendEmoji}
-                    {delta > 0 ? `+${delta}` : delta}
-                  </span>
-                </Link>
-              );
-            })}
-          </div>
-        </section>
-
+      <div>
         {/* Filterable applications table */}
-        <section className="xl:col-span-4 space-y-4">
+        <section className="space-y-4">
           <div className="panel p-4 flex flex-wrap items-center gap-3">
             <div className="flex items-center gap-1 rounded-lg bg-panel-2 p-1 border border-border/60">
               {KIND_FILTER_OPTIONS.map((opt) => (
@@ -235,7 +189,14 @@ export default function ProjectsPage() {
                       <th className="px-3 py-2.5 font-medium border-r border-border/30">Postcode</th>
                       <th className="px-3 py-2.5 font-medium border-r border-border/30">Developer</th>
                       <th className="px-3 py-2.5 font-medium border-r border-border/30">Δ Supply</th>
-                      <th className="px-3 py-2.5 font-medium border-r border-border/30">Timeline</th>
+                      <th className="px-3 py-2.5 font-medium border-r border-border/30">
+                        <div>Timeline</div>
+                        <div className="grid grid-cols-2 gap-2 text-[9px] text-muted/70 mt-1 normal-case tracking-normal">
+                          <span>prep</span>
+                          <span>project</span>
+                        </div>
+                      </th>
+                      <th className="px-3 py-2.5 font-medium border-r border-border/30">DA</th>
                       <th className="px-3 py-2.5 font-medium border-r border-border/30">Status</th>
                     </tr>
                   </thead>
@@ -257,14 +218,6 @@ export default function ProjectsPage() {
       </div>
     </div>
   );
-}
-
-function titleCase(s: string): string {
-  return s
-    .toLowerCase()
-    .split(" ")
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(" ");
 }
 
 
@@ -401,9 +354,20 @@ function ProjectRow({ a }: { a: Application }) {
         <TimelineCell a={a} sale={sale} />
       </td>
 
-      {/* Status */}
-      <td className={cx(cellBase, "max-w-[260px]")}>
-        <StatusCell a={a} insight={insight} sale={sale} streetSuffix={streetOnly(a.rawAddress)} />
+      {/* DA Status — approval state from council. */}
+      <td className={cx(cellBase, "text-center")}>
+        <div className="flex flex-col items-center justify-center h-full">
+          <DaStatusCell a={a} />
+        </div>
+      </td>
+
+      {/* Project Status — only meaningful when DA is approved. Shows the
+          lifecycle: building → finished&sold / finished&rented / dormant /
+          don't know. Sale rows render alongside the 'sold' state. */}
+      <td className={cx(cellBase, "max-w-[240px] text-center")}>
+        <div className="flex flex-col items-center justify-center h-full">
+          <ProjectStatusCell a={a} insight={insight} sale={sale} streetSuffix={streetOnly(a.rawAddress)} />
+        </div>
       </td>
     </tr>
   );
@@ -460,10 +424,22 @@ function fnv1a(s: string): number {
 
 function codenameFor(seed: string | null | undefined): string {
   if (!seed) return "unknown";
+  // 3-token format `<adj>-<adj>-<noun>` for ~135K combos vs 2,880 in the
+  // 2-token form. Birthday-paradox collisions don't kick in until ~370
+  // applicants, comfortable headroom for the dataset's expected scale.
+  // We use 3 hash slices + a second pass over the seed for the third
+  // slot so adj1/adj2 don't trivially correlate.
   const h = fnv1a(seed);
-  const adj = CODENAME_ADJ[h % CODENAME_ADJ.length];
-  const noun = CODENAME_NOUN[(h >>> 8) % CODENAME_NOUN.length];
-  return `${adj}-${noun}`;
+  const h2 = fnv1a(seed + ":noun");
+  const adj1 = CODENAME_ADJ[h % CODENAME_ADJ.length];
+  let adj2 = CODENAME_ADJ[(h >>> 8) % CODENAME_ADJ.length];
+  // Avoid `bright-bright-X`. If the two hash slots collide on the same
+  // adjective, walk forward to the next distinct one.
+  if (adj2 === adj1) {
+    adj2 = CODENAME_ADJ[(((h >>> 8) % CODENAME_ADJ.length) + 1) % CODENAME_ADJ.length];
+  }
+  const noun = CODENAME_NOUN[h2 % CODENAME_NOUN.length];
+  return `${adj1}-${adj2}-${noun}`;
 }
 
 function ApplicantCell({ insight }: { insight: DaInsight }) {
@@ -496,29 +472,42 @@ function DeltaSupplyCell({
   if (!insight?.dwellingCount) {
     return <span className="text-muted text-xs">—</span>;
   }
-  // "Finished" = at least one post-redev unit has actually sold. Until
-  // then we still render the three emojis in fixed column order so rows
-  // line up vertically — but we grayscale them to signal "projected,
-  // not realised yet".
+  // "Finished" = at least one post-redev unit has actually sold. We still
+  // show numbers when not finished as long as we have something to show
+  // (LLM-projected from drawings) — but grayscale + asterisk to mark them
+  // as projections, not realised sales.
   const finished = (sale?.unitSales.filter((u) => u.soldPrice).length ?? 0) > 0;
+  const projected = sale?.postRoomsSource === "da_docs";
 
-  // Pre-redev state: a single house on the lot. Post: from the LLM
-  // (dwellings) and from per-unit domain rows joined in build_sale_story
-  // (bedrooms, bathrooms).
-  const dwellDelta = insight.dwellingCount - 1;
+  // Vacant-land starts: parcel had no dwelling before the DA (e.g.
+  // residential land subdivided into a duplex). In that case the supply
+  // delta starts from 0, not 1, and pre br/ba are 0 not "unknown".
+  const preType = (sale?.prePropertyType ?? "").toLowerCase();
+  const preIsLand = preType === "land" || preType === "vacant";
+  const preDwellings = preIsLand ? 0 : 1;
+  const preBr = preIsLand ? 0 : sale?.preBedrooms ?? null;
+  const preBa = preIsLand ? 0 : sale?.preBathrooms ?? null;
+
+  const dwellDelta = insight.dwellingCount - preDwellings;
   const bedDelta =
-    sale?.preBedrooms != null && sale?.postBedrooms != null
-      ? sale.postBedrooms - sale.preBedrooms
+    preBr != null && sale?.postBedrooms != null
+      ? sale.postBedrooms - preBr
       : null;
   const bathDelta =
-    sale?.preBathrooms != null && sale?.postBathrooms != null
-      ? sale.postBathrooms - sale.preBathrooms
+    preBa != null && sale?.postBathrooms != null
+      ? sale.postBathrooms - preBa
       : null;
 
-  // Pre-approval stage: show only the greyed emojis, no numbers — the
-  // deltas are speculative and the user explicitly wants the cell to
-  // stay quiet until the project's actually built and selling.
-  const showNumbers = finished;
+  const projectionTip =
+    "Projected from DA plans — actual numbers appear once units list / sell";
+  const landNote = preIsLand ? " (vacant land)" : "";
+  const cellTip = projected
+    ? projectionTip + landNote
+    : !finished
+      ? "Projected — no post-redev unit sales yet" + landNote
+      : preIsLand
+        ? "Pre-redev: vacant land"
+        : undefined;
 
   return (
     <div
@@ -526,28 +515,31 @@ function DeltaSupplyCell({
         "grid grid-cols-3 gap-x-1 items-baseline text-base",
         !finished && "grayscale opacity-60",
       )}
-      title={!finished ? "Projected — no post-redev unit sales yet" : undefined}
+      title={cellTip}
     >
       <DeltaCell
         emoji="🏠"
-        delta={showNumbers ? dwellDelta : null}
-        tip={`1 → ${insight.dwellingCount}`}
+        delta={dwellDelta}
+        suffix={projected ? "*" : undefined}
+        tip={`${preDwellings} → ${insight.dwellingCount}${projected ? " (projected)" : ""}${landNote}`}
       />
       <DeltaCell
         emoji="🛏️"
-        delta={showNumbers ? bedDelta : null}
+        delta={bedDelta}
+        suffix={projected ? "*" : undefined}
         tip={
-          sale?.preBedrooms != null || sale?.postBedrooms != null
-            ? `${sale?.preBedrooms ?? "?"} → ${sale?.postBedrooms ?? "?"}`
+          preBr != null || sale?.postBedrooms != null
+            ? `${preBr ?? "?"} → ${sale?.postBedrooms ?? "?"}${projected ? " (projected)" : ""}${landNote}`
             : undefined
         }
       />
       <DeltaCell
         emoji="🛁"
-        delta={showNumbers ? bathDelta : null}
+        delta={bathDelta}
+        suffix={projected ? "*" : undefined}
         tip={
-          sale?.preBathrooms != null || sale?.postBathrooms != null
-            ? `${sale?.preBathrooms ?? "?"} → ${sale?.postBathrooms ?? "?"}`
+          preBa != null || sale?.postBathrooms != null
+            ? `${preBa ?? "?"} → ${sale?.postBathrooms ?? "?"}${projected ? " (projected)" : ""}${landNote}`
             : undefined
         }
       />
@@ -559,10 +551,12 @@ function DeltaCell({
   emoji,
   delta,
   tip,
+  suffix,
 }: {
   emoji: string;
   delta: number | null;
   tip?: string;
+  suffix?: string;
 }) {
   const tone =
     delta == null
@@ -580,7 +574,7 @@ function DeltaCell({
       <span aria-hidden>{emoji}</span>
       {delta != null && (
         <sup className={cx("font-mono num text-[10px] ml-0.5", tone)}>
-          {delta}
+          {delta}{suffix}
         </sup>
       )}
     </span>
@@ -624,30 +618,59 @@ function TimelineCell({ a, sale }: { a: Application; sale: SaleStory | undefined
   }
 
   return (
-    <div className="leading-tight">
-      <div className="flex items-baseline gap-2">
-        <span className="text-[10px] text-muted uppercase tracking-wide w-14">Prep</span>
-        <span className="font-mono num text-sm">{fmtDuration(prepDays)}</span>
-      </div>
-      <div className="flex items-baseline gap-2 mt-0.5">
-        <span className="text-[10px] text-muted uppercase tracking-wide w-14">Project</span>
-        {finished ? (
-          <span className="font-mono num text-sm">{fmtDuration(projectDays)}</span>
-        ) : (
-          <span className="font-mono num text-sm text-muted">ongoing</span>
-        )}
-      </div>
+    <div className="grid grid-cols-2 gap-2 items-baseline text-center leading-tight">
+      <span className="font-mono num text-sm">{fmtDuration(prepDays)}</span>
+      {finished ? (
+        <span className="font-mono num text-sm">{fmtDuration(projectDays)}</span>
+      ) : (
+        <span className="font-mono num text-sm text-muted">ongoing</span>
+      )}
     </div>
   );
 }
 
-/** Synthesize the right "Status" given the full picture:
- *  - All units sold → ✅ Completed (and show each sale price)
- *  - Some sold → 🚧 In progress (% sold)
- *  - Approved + no sales yet → 📐 Approved
- *  - Otherwise → council status (Pending / Refused / etc.)
+/** DA approval state from the council — independent of what happened
+ *  after. Three buckets:
+ *    ✅ approved   — decision_outcome contains 'approv'
+ *    ❌ denied    — decision_outcome contains 'refus' or status 'withdrawn'
+ *    ⏳ awaiting  — anything else (Lodged / Information Request / pending)
  */
-function StatusCell({
+function DaStatusCell({ a }: { a: Application }) {
+  const outcome = (a.decisionOutcome ?? "").toLowerCase();
+  const statusLower = (a.status ?? "").toLowerCase();
+
+  let icon = "⏳";
+  let label = "Awaiting decision";
+  if (outcome.includes("approv")) {
+    icon = "✅";
+    label = "Approved";
+  } else if (outcome.includes("refus") || statusLower.includes("withdrawn")) {
+    icon = "❌";
+    label = outcome.includes("refus") ? "Refused" : "Withdrawn";
+  }
+
+  const tip =
+    a.status && a.status !== a.decisionOutcome
+      ? `${label} — ${a.status}`
+      : label;
+  return (
+    <span title={tip} className="text-base leading-none">
+      {icon}
+    </span>
+  );
+}
+
+/** Project lifecycle. Only meaningful when the DA is approved; otherwise
+ *  renders '—'. States:
+ *    ✅ Sold N%    — at least one post-redev unit has sold (renders sale rows)
+ *    🏘️ Rented    — unit-prefixed listing exists but no sale (built_unsold)
+ *    🏗️ Building   — approved <2y ago, no built signals yet
+ *    ❓ Don't know — approved 2-3y ago, no built signals (between
+ *                    'still building' and 'definitely dormant')
+ *    💤 Dormant    — approved >3y ago, no built signals (built_status =
+ *                    abandoned_likely from the API)
+ */
+function ProjectStatusCell({
   a,
   insight,
   sale,
@@ -658,11 +681,14 @@ function StatusCell({
   sale: SaleStory | undefined;
   streetSuffix: string;
 }) {
+  const isApproved = (a.decisionOutcome ?? "").toLowerCase().includes("approv");
+  if (!isApproved) {
+    return <span className="text-muted text-xs">—</span>;
+  }
+
   const dwellingCount = insight?.dwellingCount ?? 0;
   const nSold = sale?.unitSales.filter((u) => u.soldPrice).length ?? 0;
-  const allSold = dwellingCount > 0 && nSold >= dwellingCount;
-  const someSold = nSold > 0 && !allSold;
-  const isApproved = (a.decisionOutcome ?? "").toLowerCase().includes("approved");
+  const anySold = nSold > 0;
 
   // Pull "124" out of "124 Sunshine Parade" so the SALE rows show
   // "1/124", "2/124" etc.
@@ -678,60 +704,64 @@ function StatusCell({
       ) : null,
     );
 
-  if (allSold && sale) {
+  // Finished and sold (covers all-sold and some-sold; the percent shows
+  // progress so a single 'sold' state is enough).
+  if (anySold && sale) {
+    const pct = dwellingCount > 0
+      ? Math.round((nSold / dwellingCount) * 100)
+      : null;
+    const label = pct === 100 ? "Sold" : pct != null ? `Sold ${pct}%` : "Sold";
+    const toneCls = pct === 100 ? "text-good" : "text-warn";
     return (
-      <div className="leading-tight space-y-1">
-        <div className="pill border-good/40 text-good bg-good/10 text-xs inline-flex">
-          ✅ Completed · 100%
-        </div>
-        <div className="space-y-0.5">{renderSaleRows()}</div>
+      <div className="flex flex-col items-center justify-center leading-tight space-y-1">
+        <div className={cx("text-xs font-medium", toneCls)}>✅ {label}</div>
+        <div className="space-y-0.5 text-center">{renderSaleRows()}</div>
       </div>
     );
   }
 
-  if (someSold && sale) {
-    const pct = Math.round((nSold / Math.max(dwellingCount, 1)) * 100);
+  // Approved-but-not-sold buckets are driven by built_status from the API.
+  const built = sale?.builtStatus;
+
+  if (built === "built_unsold") {
     return (
-      <div className="leading-tight space-y-1">
-        <div className="pill border-warn/40 text-warn bg-warn/10 text-xs inline-flex">
-          🚧 Selling · {pct}%
-        </div>
-        <div className="space-y-0.5">{renderSaleRows()}</div>
+      <div
+        className="text-xs font-medium"
+        title="Finished — built but not sold (held / rented)"
+      >
+        <span className="text-good">✅</span>{" "}
+        <span className="text-warn">Rented</span>
       </div>
     );
   }
 
-  if (isApproved) {
+  if (built === "abandoned_likely") {
     return (
-      <div className="leading-tight">
-        <div className="pill border-accent/40 text-accent bg-accent/10 text-xs inline-flex">
-          📐 Approved
-        </div>
-        {a.status && a.status !== a.decisionOutcome && (
-          <div className="text-[10px] text-muted mt-1">{a.status}</div>
-        )}
-      </div>
+      <span title="Dormant — >3 years approved, no built signals" className="text-base leading-none">
+        💤
+      </span>
     );
   }
 
-  // No decision recorded yet — DA is still working through council.
-  // Covers councilStatus = 'Lodged' / 'Information Request' / null and
-  // anything that's not refused/withdrawn.
-  const refused =
-    (a.decisionOutcome ?? "").toLowerCase().includes("refus") ||
-    (a.status ?? "").toLowerCase().includes("withdrawn");
-  if (!refused) {
+  // Unknown — split by age. Approved <15mo ago → 'Building' (15 months
+  // is roughly the floor for a duplex from approval to completion).
+  // 15-36mo with no signals → 'Don't know' (longer than typical, but
+  // not yet old enough to call dormant). >36mo handled above by the
+  // SQL's abandoned_likely branch.
+  const decisionDate = a.decisionDate ? new Date(a.decisionDate) : null;
+  const monthsSinceDecision = decisionDate
+    ? (Date.now() - decisionDate.getTime()) / (1000 * 60 * 60 * 24 * 30.44)
+    : null;
+  if (monthsSinceDecision != null && monthsSinceDecision < 15) {
     return (
-      <div className="leading-tight">
-        <div className="pill border-warn/40 text-warn bg-warn/10 text-xs inline-flex">
-          🟠 Getting approvals
-        </div>
-        {a.status && (
-          <div className="text-[10px] text-muted mt-1">{a.status}</div>
-        )}
-      </div>
+      <span title={`Building — approved ${monthsSinceDecision.toFixed(0)}mo ago (under 15mo, the typical duplex build floor)`} className="text-base leading-none">
+        🏗️
+      </span>
     );
   }
-
-  return <StatusPill status={a.status} />;
+  return (
+    <span title="Don't know — approved long enough we'd expect signals, but none on file" className="text-base leading-none">
+      ❓
+    </span>
+  );
 }

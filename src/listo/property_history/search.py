@@ -130,6 +130,49 @@ def _extract_urls(html: str) -> set[str]:
     return found
 
 
+# Catch-all URL pattern for unscoped Google searches. We keep this lax
+# (any https://) and filter Google/CDN noise in `_extract_general_urls`.
+_ANY_URL_RE = re.compile(r'https?://[^\s"\'<>()]+')
+
+# Google-internal + boilerplate hosts to drop from general extraction.
+# These appear in every results page (toolbar links, CDN assets, support
+# pages, etc.) and aren't real third-party hits.
+_GENERAL_URL_HOST_DENYLIST = {
+    "google.com", "www.google.com", "policies.google.com", "support.google.com",
+    "maps.google.com", "translate.google.com", "accounts.google.com",
+    "schema.org", "www.w3.org", "gstatic.com", "www.gstatic.com",
+    "googleusercontent.com", "googleapis.com",
+    # Realestate + Domain are already covered by the scoped queries.
+    "www.realestate.com.au", "realestate.com.au",
+    "www.domain.com.au", "domain.com.au",
+}
+
+
+def _extract_general_urls(html: str) -> set[str]:
+    """Pull every plausible third-party URL out of a Google results page.
+
+    Used for unscoped searches (no `site:` filter) where any non-Google
+    domain that mentions the address is potential evidence — e.g. agency
+    sites like rwbgrentals.com that index 'leased' listings outside the
+    REA / Domain duopoly.
+    """
+    found: set[str] = set()
+    for m in _ANY_URL_RE.findall(html):
+        url = _clean_url(m)
+        # Cheap host extraction — _clean_url already drops query/fragment.
+        host_match = re.match(r"^https?://([^/]+)", url)
+        if not host_match:
+            continue
+        host = host_match.group(1).lower()
+        if host in _GENERAL_URL_HOST_DENYLIST:
+            continue
+        # Drop google subdomains catch-all (e.g. webcache.googleusercontent.com).
+        if host.endswith(".google.com") or host.endswith(".googleusercontent.com"):
+            continue
+        found.add(url)
+    return found
+
+
 # ---------- Throttle ----------
 
 
@@ -174,6 +217,27 @@ def google_search(query: str) -> SearchResult:
         finally:
             page.close()
     urls = sorted(_extract_urls(html))
+    return SearchResult(query=query, urls=urls, page_html_size=len(html))
+
+
+def google_search_general(query: str) -> SearchResult:
+    """Like `google_search` but extracts URLs from any third-party domain
+    (REA / Domain / agency sites / etc.). Used for unscoped queries
+    where the goal is 'does anyone on the open web mention this exact
+    address phrase?' — evidence the unit was built and listed at some
+    point, even outside REA/Domain.
+    """
+    _throttle()
+    url = GOOGLE_BASE + _quote(query)
+    logger.info("google search (general): %s", query)
+    with cdp_session() as (_browser, ctx):
+        page = ctx.new_page()
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=20_000)
+            html = page.content()
+        finally:
+            page.close()
+    urls = sorted(_extract_general_urls(html))
     return SearchResult(query=query, urls=urls, page_html_size=len(html))
 
 
@@ -229,6 +293,35 @@ def cache_urls(*, search_address: str, query: str, urls: Iterable[str]) -> int:
             )
             res = s.execute(stmt)
             if res.rowcount == 1:  # rowcount is 1 for INSERT, 2 for UPDATE in MySQL
+                inserted += 1
+    return inserted
+
+
+def cache_urls_general(*, search_address: str, query: str, urls: Iterable[str]) -> int:
+    """Persist results from an unscoped Google search. URL kind is fixed
+    to 'unit_general' — we don't try to tell rentals from sales from
+    body-corp pages here, only that the phrase surfaced *somewhere*.
+    """
+    now = datetime.utcnow()
+    inserted = 0
+    with session_scope() as s:
+        for url in urls:
+            stmt = mysql_insert(DiscoveredUrl).values(
+                search_address=search_address[:255],
+                search_query=query[:255],
+                url=url[:1024],
+                url_hash=_sha256(url),
+                url_kind="unit_general",
+                search_engine="google",
+                discovered_at=now,
+                fetched_at=None,
+            )
+            stmt = stmt.on_duplicate_key_update(
+                search_address=stmt.inserted.search_address,
+                search_query=stmt.inserted.search_query,
+            )
+            res = s.execute(stmt)
+            if res.rowcount == 1:
                 inserted += 1
     return inserted
 

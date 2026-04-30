@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
 import {
   ResponsiveContainer,
   BarChart,
@@ -16,6 +17,7 @@ import { api } from "../lib/client";
 import { KIND_META } from "../lib/kinds";
 import { DaKind } from "../gen/listo_pb";
 import EmptyState from "../components/EmptyState";
+import { cx, num, titleCase } from "../lib/format";
 
 export default function TrendsPage() {
   const [suburb, setSuburb] = useState<string>("");
@@ -62,6 +64,51 @@ export default function TrendsPage() {
           {data.length} monthly buckets
         </div>
       </div>
+
+      {/* Trending suburbs leaderboard — moved here from the Projects page. */}
+      <section className="panel">
+        <header className="px-4 py-3 border-b border-border/60">
+          <h2 className="text-xs font-semibold tracking-wide uppercase text-muted">
+            🔥 Trending suburbs
+          </h2>
+        </header>
+        <div className="divide-y divide-border/40">
+          {suburbs.data?.items.length === 0 && (
+            <EmptyState
+              emoji="🌱"
+              title="No suburb stats yet"
+              hint="Trending data appears once the scraper has indexed at least a few months of DAs."
+            />
+          )}
+          {suburbs.data?.items.slice(0, 12).map((s, i) => {
+            const last = Number(s.nLast30d);
+            const prev = Number(s.nPrev30d);
+            const delta = last - prev;
+            const trendEmoji = delta > 0 ? "📈" : delta < 0 ? "📉" : "➡️";
+            const trendClass =
+              delta > 0 ? "text-good" : delta < 0 ? "text-bad" : "text-muted";
+            return (
+              <Link
+                key={s.suburb}
+                to={`/?suburb=${encodeURIComponent(s.suburb)}`}
+                className="row-hover flex items-center gap-2 px-3 py-2 text-xs"
+              >
+                <span className="w-4 text-muted num text-right">{i + 1}</span>
+                <span className="flex-1 truncate" title={titleCase(s.suburb)}>
+                  {titleCase(s.suburb)}
+                </span>
+                <span className="font-mono num text-text w-7 text-right">
+                  {num(s.nKind)}
+                </span>
+                <span className={cx("font-mono num w-10 text-right", trendClass)}>
+                  {trendEmoji}
+                  {delta > 0 ? `+${delta}` : delta}
+                </span>
+              </Link>
+            );
+          })}
+        </div>
+      </section>
 
       {data.length === 0 ? (
         <EmptyState

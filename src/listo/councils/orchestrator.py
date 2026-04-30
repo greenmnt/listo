@@ -514,6 +514,73 @@ def _phase_detail(
     return n
 
 
+def fetch_app_docs(application_id: str, *, doc_dir: Path = DEFAULT_DOC_DIR) -> tuple[int, int]:
+    """Re-run the docs phase for a single application, downloading every
+    listed doc (not just first+last) so the LLM has the full bundle.
+
+    Used as 'phase 0' before analyse_da.sh — covers cases where the
+    initial scrape only pulled the first/last doc and missed the
+    Form 1 / Cover Letter that names the developer.
+
+    Returns (apps_done, files_done) — the same shape as `_phase_docs`.
+    """
+    import os
+    from listo.councils.registry import get_council
+
+    with session_scope() as s:
+        row = s.execute(
+            select(
+                CouncilApplication.id,
+                CouncilApplication.application_id,
+                CouncilApplication.application_url,
+                CouncilApplication.council_slug,
+                CouncilApplication.vendor,
+                CouncilApplication.lodged_date,
+            ).where(CouncilApplication.application_id == application_id)
+        ).first()
+    if row is None:
+        raise KeyError(f"unknown application_id: {application_id}")
+    app_pk, app_id, app_url, council_slug, vendor, lodged_date = row
+
+    council = get_council(council_slug)
+    # CouncilBackend has no `vendor` field — its scrapers carry that.
+    # Pick the backend whose date coverage spans the app's lodged_date,
+    # mirroring how `run_council` routes work to the right backend.
+    backend = None
+    if lodged_date is not None:
+        backend = next(
+            (b for b in council.backends if b.covers(date_from=lodged_date, date_to=lodged_date)),
+            None,
+        )
+    if backend is None and len(council.backends) == 1:
+        backend = council.backends[0]
+    if backend is None:
+        raise RuntimeError(
+            f"no backend for council={council_slug} vendor={vendor} (lodged={lodged_date})"
+        )
+
+    # LISTO_DOWNLOAD_ALL=1 flips _select_download_indices so every listed
+    # doc is fetched, not just first+last.
+    prev_env = os.environ.get("LISTO_DOWNLOAD_ALL")
+    os.environ["LISTO_DOWNLOAD_ALL"] = "1"
+    try:
+        scraper_ctx = backend.factory()
+        with scraper_ctx as scraper:
+            sink = DbRequestSink(council_slug=scraper.council_slug, vendor=scraper.vendor)
+            apps_done, files_done = _fetch_docs_for_app(
+                scraper, sink,
+                app_pk=app_pk, app_id=app_id, app_url=app_url,
+                doc_dir=doc_dir,
+            )
+    finally:
+        if prev_env is None:
+            os.environ.pop("LISTO_DOWNLOAD_ALL", None)
+        else:
+            os.environ["LISTO_DOWNLOAD_ALL"] = prev_env
+
+    return apps_done, files_done
+
+
 def _phase_docs(
     scraper, sink, *,
     council_slug: str, vendor: str,
@@ -543,85 +610,97 @@ def _phase_docs(
     files_done = 0
     total = len(pending)
     for i, (app_pk, app_id, app_url) in enumerate(pending, start=1):
-        from listo.councils.base import DaDetailRecord
-        # Skip apps whose stored URL clearly can't reach the docs portal
-        # (e.g. legacy javascript: postback URLs, error-page captures, or
-        # missing URLs). Don't stamp docs_fetched_at — leave them NULL so
-        # the next list-walk run re-clicks them via the inline path.
-        if not app_url or "Error.aspx" in app_url or "?Id=" not in app_url and "&Id=" not in app_url:
-            logger.info(
-                "[docs %d/%d] %s — skipping, no usable detail URL (%s)",
-                i, total, app_id, (app_url or "")[:80],
-            )
-            continue
-        detail = DaDetailRecord(
-            council_slug=council_slug,
-            vendor=vendor,
-            application_id=app_id,
-            application_url=app_url,
-        )
         try:
-            docs = scraper.list_documents(detail, sink)
-        except Exception as e:
-            logger.warning("[docs %d/%d] index failed for %s: %s", i, total, app_id, e)
-            continue
-        logger.info("[docs %d/%d] %s — %d documents", i, total, app_id, len(docs))
-
-        # Apply the same first+last download policy that the inline
-        # list walk uses, so legacy apps being processed here don't
-        # silently pull every plan set + technical report. Sort by
-        # published_at when available; otherwise use the order returned
-        # by the docs portal (already chronological per its default
-        # sort on the Date published column).
-        from listo.councils.parsing import parse_size_to_bytes
-        from listo.councils.infor_epathway import _select_download_indices
-
-        ordered_docs = sorted(
-            docs,
-            key=lambda r: (r.published_at is None, r.published_at or ""),
-        )
-        download_idx = _select_download_indices(len(ordered_docs))
-
-        target = doc_dir / app_id.replace("/", "_")
-        for j, ref in enumerate(ordered_docs, start=1):
-            do_download = (j - 1) in download_idx
-            tag = "DOWNLOAD" if do_download else "metadata"
-            logger.info(
-                "[docs %d/%d] %s   ↳ %d/%d [%s] %s (%s)",
-                i, total, app_id, j, len(ordered_docs), tag,
-                (ref.title or ref.doc_oid or "?")[:60],
-                ref.size_text or "?",
+            a, f = _fetch_docs_for_app(
+                scraper, sink,
+                app_pk=app_pk, app_id=app_id, app_url=app_url,
+                doc_dir=doc_dir, log_prefix=f"[docs {i}/{total}]",
             )
-            if do_download:
-                try:
-                    dl = scraper.download(ref, target, sink)
-                    upsert_document(app_pk, dl)
-                    files_done += 1
-                    continue
-                except Exception as e:
-                    logger.warning(
-                        "[docs %d/%d] %s   ↳ download failed for %s: %s — keeping metadata-only",
-                        i, total, app_id, ref.doc_oid, e,
-                    )
-            # Metadata-only persist: insert/update the row without
-            # downloading bytes. file_size is best-effort from the
-            # portal's text estimate.
-            from listo.councils.base import DownloadedDocument
-            upsert_document(app_pk, DownloadedDocument(
-                doc_oid=ref.doc_oid,
-                title=ref.title,
-                doc_type=ref.doc_type,
-                source_url=ref.source_url,
-                file_path=None,
-                file_size=parse_size_to_bytes(ref.size_text),
-                mime_type=None,
-                content_hash=None,
-                page_count=None,
-                published_at=ref.published_at,
-            ))
-        mark_docs_fetched(app_pk)
-        apps_done += 1
+            apps_done += a
+            files_done += f
+        except Exception as e:
+            logger.warning("[docs %d/%d] %s — failed: %s", i, total, app_id, e)
     logger.info(
         "=== phase docs complete: %d apps, %d files ===", apps_done, files_done,
     )
     return apps_done, files_done
+
+
+def _fetch_docs_for_app(
+    scraper, sink, *,
+    app_pk: int, app_id: str, app_url: str | None,
+    doc_dir: Path, log_prefix: str = "[docs]",
+) -> tuple[int, int]:
+    """Per-app docs-phase body. Returns (1, files_done) on success or
+    (0, 0) when the app's URL is unusable. Honours LISTO_DOWNLOAD_ALL
+    via the existing `_select_download_indices` helper.
+    """
+    from listo.councils.base import DaDetailRecord, DownloadedDocument
+    from listo.councils.parsing import parse_size_to_bytes
+    from listo.councils.infor_epathway import _select_download_indices
+
+    # Skip apps whose stored URL clearly can't reach the docs portal
+    # (e.g. legacy javascript: postback URLs, error-page captures, or
+    # missing URLs). Don't stamp docs_fetched_at — leave them NULL so
+    # the next list-walk run re-clicks them via the inline path.
+    if not app_url or "Error.aspx" in app_url or "?Id=" not in app_url and "&Id=" not in app_url:
+        logger.info(
+            "%s %s — skipping, no usable detail URL (%s)",
+            log_prefix, app_id, (app_url or "")[:80],
+        )
+        return 0, 0
+
+    detail = DaDetailRecord(
+        council_slug=scraper.council_slug,
+        vendor=scraper.vendor,
+        application_id=app_id,
+        application_url=app_url,
+    )
+    docs = scraper.list_documents(detail, sink)
+    logger.info("%s %s — %d documents", log_prefix, app_id, len(docs))
+
+    ordered_docs = sorted(
+        docs,
+        key=lambda r: (r.published_at is None, r.published_at or ""),
+    )
+    download_idx = _select_download_indices(len(ordered_docs))
+
+    target = doc_dir / app_id.replace("/", "_")
+    files_done = 0
+    for j, ref in enumerate(ordered_docs, start=1):
+        do_download = (j - 1) in download_idx
+        tag = "DOWNLOAD" if do_download else "metadata"
+        logger.info(
+            "%s %s   ↳ %d/%d [%s] %s (%s)",
+            log_prefix, app_id, j, len(ordered_docs), tag,
+            (ref.title or ref.doc_oid or "?")[:60],
+            ref.size_text or "?",
+        )
+        if do_download:
+            try:
+                dl = scraper.download(ref, target, sink)
+                upsert_document(app_pk, dl)
+                files_done += 1
+                continue
+            except Exception as e:
+                logger.warning(
+                    "%s %s   ↳ download failed for %s: %s — keeping metadata-only",
+                    log_prefix, app_id, ref.doc_oid, e,
+                )
+        # Metadata-only persist: insert/update the row without
+        # downloading bytes. file_size is best-effort from the
+        # portal's text estimate.
+        upsert_document(app_pk, DownloadedDocument(
+            doc_oid=ref.doc_oid,
+            title=ref.title,
+            doc_type=ref.doc_type,
+            source_url=ref.source_url,
+            file_path=None,
+            file_size=parse_size_to_bytes(ref.size_text),
+            mime_type=None,
+            content_hash=None,
+            page_count=None,
+            published_at=ref.published_at,
+        ))
+    mark_docs_fetched(app_pk)
+    return 1, files_done

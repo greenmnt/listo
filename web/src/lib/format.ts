@@ -74,3 +74,12 @@ export function cx(
 ): string {
   return classes.filter(Boolean).join(" ");
 }
+
+/** "VARSITY LAKES" → "Varsity Lakes". Used wherever the DB suburb (uppercased) needs to be displayed. */
+export function titleCase(s: string): string {
+  return s
+    .toLowerCase()
+    .split(" ")
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}

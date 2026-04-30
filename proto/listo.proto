@@ -159,6 +159,23 @@ message SaleStory {
   // Where site_area_m2 came from. 'domain' | 'realestate' | 'da_docs'.
   // 'da_docs' = LLM-extracted from drawings/plans — show with uncertainty.
   optional string site_area_source = 13;
+  // Where post_bedrooms / post_bathrooms came from.
+  // 'da_docs' = projected from DA plans; 'domain' / 'realestate' = actual
+  // from listed/sold post-redev units.
+  optional string post_rooms_source = 14;
+  // Pre-redev parcel type from Domain. 'Land' / 'Vacant' means there
+  // was no dwelling on the lot before the DA — the supply / bed / ba
+  // deltas should start from 0, not 1.
+  optional string pre_property_type = 15;
+  // Project lifecycle for approved DAs. NULL for non-approved.
+  //   'built_sold'        — at least one post-decision unit sale on file.
+  //   'built_unsold'      — unit-prefixed property record exists OR Google
+  //                         evidence for the unit address (built but never
+  //                         listed for sale; held / rented).
+  //   'abandoned_likely'  — decision_date >3 years old, no signals.
+  //   'unknown'           — approved, no signals yet (still in build, or
+  //                         we just haven't searched).
+  optional string built_status = 16;
 }
 
 message UnitSale {

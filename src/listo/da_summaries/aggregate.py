@@ -281,15 +281,26 @@ def _aggregate_one(s, app_pk: int, prompt_version: str) -> str:
     """), {"app_pk": app_pk}).fetchone()
     days_lodge_to_decide_row = ca_row  # back-compat alias for downstream code
 
-    # Splice a street number in from raw_address when the LLM dropped it
-    # (typically when raw_address has a "Lot N SPnnn," prefix), then
-    # canonicalise punctuation. Without these, the API's LIKE-based
-    # property matches against domain_properties.display_address fail.
-    if fields.get("street_address") and ca_row is not None:
-        spliced = _splice_street_number(
-            ca_row.raw_address, fields.get("street_address")
-        )
-        fields["street_address"] = _canonicalise_street_address(spliced)
+    # Prefer raw_address parsed by `split_council_address` over the LLM's
+    # free-form street_address. The LLM has been observed to:
+    #   - scramble word order (e.g. 'Cypress Terrace North 450 Palm Beach')
+    #   - drop a digit ('11' → '1' in 'Ocean Street')
+    #   - omit commas / state abbreviation
+    # …all of which break the API's LIKE-prefix matches against Domain /
+    # Realestate display_address. The raw_address is well-formed in 95%+
+    # of cases, so reconstruct the canonical "<street>, <Suburb> <STATE>
+    # <pc>" form directly when we can. Fall back to splice + canonicalise
+    # of the LLM value for the rare raws that don't match the regex.
+    if ca_row is not None and ca_row.raw_address:
+        from listo.councils.parsing import split_council_address
+        street, suburb, postcode, state = split_council_address(ca_row.raw_address)
+        if street and suburb and postcode and state:
+            fields["street_address"] = f"{street}, {suburb} {state} {postcode}"
+        elif fields.get("street_address"):
+            spliced = _splice_street_number(
+                ca_row.raw_address, fields.get("street_address")
+            )
+            fields["street_address"] = _canonicalise_street_address(spliced)
 
     n_docs_summarised = sum(1 for r in rows if r.extraction_method != "skipped")
 

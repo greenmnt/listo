@@ -113,9 +113,18 @@ time_phase() {
 }
 
 list_duplex_candidates() {
-  # Unprocessed duplex DAs (no da_summaries row) with at least one
-  # build-relevant doc on disk. Ordered most-doc-rich first so the
-  # interesting ones run early.
+  # Unprocessed duplex DAs (no da_summaries row).
+  #
+  # We require a Plans/Drawings doc AND a Supporting Document to be
+  # *indexed* (listed in council_application_documents) but NOT
+  # necessarily *downloaded* — phase 0 of the per-app pipeline pulls
+  # any missing docs on demand via `listo council fetch-app-docs`.
+  # This unlocks the long tail of DAs where the bulk scrape only
+  # grabbed first+last and missed the substantive bundle.
+  #
+  # Ordering: oldest lodgement first (older parent sale → duplex has
+  # had time to be built/listed/sold → complete pre→post signal).
+  # Then prefer doc-rich apps so the LLM has more to work with.
   local lim_clause=""
   [[ "$LIMIT" -gt 0 ]] && lim_clause="LIMIT $LIMIT"
 
@@ -126,19 +135,19 @@ SELECT ca.application_id
   LEFT JOIN da_summaries ds ON ds.application_id = ca.id
  WHERE ds.application_id IS NULL
    AND ca.description REGEXP 'DUAL OCCUPANCY|DUPLEX'
-   AND d.file_path IS NOT NULL
  GROUP BY ca.id, ca.application_id
 HAVING SUM(d.doc_type LIKE '%Drawing%'
         OR d.doc_type LIKE '%Plans%'
         OR d.doc_type LIKE '%Stamped Approved Plan%') >= 1
    AND SUM(d.doc_type LIKE '%Supporting Document%') >= 1
- ORDER BY (
+ ORDER BY
+   ca.lodged_date ASC,
+   (
      SUM(d.doc_type LIKE '%Drawing%' OR d.doc_type LIKE '%Plans%' OR d.doc_type LIKE '%Stamped Approved Plan%')
    + SUM(d.doc_type LIKE '%Supporting Document%')
    + SUM(d.doc_type LIKE '%Specialist Report%')
- ) DESC,
-   COUNT(d.id) DESC,
-   ca.lodged_date DESC
+   ) DESC,
+   COUNT(d.id) DESC
  $lim_clause;
 SQL
 }
@@ -156,6 +165,30 @@ run_pipeline() {
   PHASE_TIMINGS=()
   local pipeline_start
   pipeline_start=$(date +%s)
+
+  # Phase 0 — make sure every listed doc has actually been downloaded.
+  # The initial bulk scrape only pulls first+last per app (size cap), so
+  # apps often have a Form 1 / Cover Letter that was indexed but never
+  # fetched, leaving the LLM blind to applicant/builder names. This step
+  # forces a full per-app re-fetch (LISTO_DOWNLOAD_ALL=1 internally).
+  # Idempotent — already-downloaded docs are skipped by content_hash.
+  local missing_docs
+  missing_docs=$(MYSQL_PWD="$DB_PASS" mysql -u "$DB_USER" -N -B "$DB_NAME" <<SQL
+SELECT COUNT(*)
+  FROM council_application_documents cad
+  JOIN council_applications ca ON ca.id = cad.application_id
+ WHERE ca.application_id = '$app_id'
+   AND cad.file_path IS NULL;
+SQL
+)
+  if [[ "${missing_docs:-0}" -gt 0 ]]; then
+    time_phase "phase 0: fetch missing docs ($missing_docs listed but undownloaded)" \
+      uv run listo council fetch-app-docs "$app_id"
+  else
+    echo "-- phase 0: all docs on disk, skipping --"
+    PHASE_TIMINGS+=("$(printf '  %-40s %s' "phase 0: fetch missing docs (skipped)" "0s")")
+  fi
+  echo
 
   time_phase "phase 1: summarise" \
     uv run listo da summarise --app-id "$app_id" --model "$model"
@@ -185,11 +218,16 @@ run_pipeline() {
     echo
     time_phase "property history (google + comparables)" \
       uv run listo property history --da "$app_id" --skip-listings
+    echo
+    # Built-status check — Google for unit-prefixed addresses to detect
+    # duplexes built but never sold (held / rented). Needs Chrome :9222.
+    time_phase "built-status check (unit-prefixed Google)" \
+      uv run listo da check-built --app-id "$app_id" --min-age-months 6
   else
     time_phase "property fetch (domain only — chrome :9222 down)" \
       uv run listo property fetch --da "$app_id" --sources domain
     echo
-    echo "  Skipped: realestate fetch + comparable discovery."
+    echo "  Skipped: realestate fetch + comparable discovery + built-status check."
     echo "  to enable: launch chrome with"
     echo "    google-chrome --remote-debugging-port=9222 --user-data-dir=/tmp/listo-chrome"
     echo "  visit realestate.com.au + domain.com.au once each, then re-run this script."

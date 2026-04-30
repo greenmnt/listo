@@ -70,21 +70,30 @@ pub async fn list(
                                   AND bf.site_area_m2 > 0) THEN 'da_docs'
                   ELSE NULL
                 END                                                                   AS site_area_source,
+                -- Pre-redev price: most-recent (not MAX) sale on file before
+                -- lodgement, gated to within 10 years of lodgement. Older sales
+                -- predate the developer's likely purchase (lots get held,
+                -- inherited, family-transferred without a recorded sale), so
+                -- showing them as 'site cost' is misleading. >10y → NULL.
                 CAST(COALESCE(
-                  (SELECT MAX(s.event_price)
+                  (SELECT s.event_price
                      FROM domain_sales s
                      JOIN domain_properties dp ON dp.id = s.domain_property_id
                     WHERE dp.display_address LIKE CONCAT(ds.street_address, '%')
                       AND s.event_date < ca.lodged_date
+                      AND s.event_date >= DATE_SUB(ca.lodged_date, INTERVAL 10 YEAR)
                       AND s.is_sold = 1
-                      AND s.event_price IS NOT NULL),
-                  (SELECT MAX(s.event_price)
+                      AND s.event_price IS NOT NULL
+                    ORDER BY s.event_date DESC LIMIT 1),
+                  (SELECT s.event_price
                      FROM realestate_sales s
                      JOIN realestate_properties rp ON rp.id = s.realestate_property_id
                     WHERE rp.display_address LIKE CONCAT(ds.street_address, '%')
                       AND s.event_date < ca.lodged_date
+                      AND s.event_date >= DATE_SUB(ca.lodged_date, INTERVAL 10 YEAR)
                       AND s.event_type = 'sold'
-                      AND s.event_price IS NOT NULL)
+                      AND s.event_price IS NOT NULL
+                    ORDER BY s.event_date DESC LIMIT 1)
                 ) AS UNSIGNED)                                                        AS pre_price,
                 COALESCE(
                   (SELECT s.event_date
@@ -92,6 +101,7 @@ pub async fn list(
                      JOIN domain_properties dp ON dp.id = s.domain_property_id
                     WHERE dp.display_address LIKE CONCAT(ds.street_address, '%')
                       AND s.event_date < ca.lodged_date
+                      AND s.event_date >= DATE_SUB(ca.lodged_date, INTERVAL 10 YEAR)
                       AND s.is_sold = 1
                       AND s.event_price IS NOT NULL
                     ORDER BY s.event_date DESC LIMIT 1),
@@ -100,6 +110,7 @@ pub async fn list(
                      JOIN realestate_properties rp ON rp.id = s.realestate_property_id
                     WHERE rp.display_address LIKE CONCAT(ds.street_address, '%')
                       AND s.event_date < ca.lodged_date
+                      AND s.event_date >= DATE_SUB(ca.lodged_date, INTERVAL 10 YEAR)
                       AND s.event_type = 'sold'
                       AND s.event_price IS NOT NULL
                     ORDER BY s.event_date DESC LIMIT 1)
@@ -109,12 +120,14 @@ pub async fn list(
                                  JOIN domain_properties dp ON dp.id = s.domain_property_id
                                 WHERE dp.display_address LIKE CONCAT(ds.street_address, '%')
                                   AND s.event_date < ca.lodged_date
+                                  AND s.event_date >= DATE_SUB(ca.lodged_date, INTERVAL 10 YEAR)
                                   AND s.is_sold = 1
                                   AND s.event_price IS NOT NULL) THEN 'domain'
                   WHEN EXISTS (SELECT 1 FROM realestate_sales s
                                  JOIN realestate_properties rp ON rp.id = s.realestate_property_id
                                 WHERE rp.display_address LIKE CONCAT(ds.street_address, '%')
                                   AND s.event_date < ca.lodged_date
+                                  AND s.event_date >= DATE_SUB(ca.lodged_date, INTERVAL 10 YEAR)
                                   AND s.event_type = 'sold'
                                   AND s.event_price IS NOT NULL) THEN 'realestate'
                   ELSE NULL
@@ -165,11 +178,20 @@ pub async fn list(
                     WHERE rp.display_address LIKE CONCAT(ds.street_address, '%')
                       AND rp.unit_number = '')
                 ) AS SIGNED)                                                        AS pre_bathrooms,
-                -- Post-redev — sum bedrooms/bathrooms across distinct unit
-                -- numbers. Inner MAX collapses duplicate property rows for
-                -- the same unit. EXISTS-link to the parent property to
-                -- guarantee we're looking at the right address (mirrors the
-                -- post-sales subqueries above).
+                -- Pre-redev parcel type (Domain only — Realestate doesn't list
+                -- 'Land'). 'Land' / 'Vacant' indicates the original site had no
+                -- dwelling: the supply delta starts from 0, not 1.
+                (SELECT MAX(dp.property_type) FROM domain_properties dp
+                  WHERE dp.display_address LIKE CONCAT(ds.street_address, '%')
+                    AND dp.unit_number = '')                                          AS pre_property_type,
+                -- Post-redev bedrooms/bathrooms. Priority chain:
+                --   1. domain: sum across distinct unit children — but only
+                --      if the count of unit children >= dwelling_count
+                --      (otherwise we have partial data that misleads).
+                --   2. realestate: same shape, same completeness gate.
+                --   3. da_docs: LLM-extracted per-unit count from drawings,
+                --      times dwelling_count. Used as a projection when no
+                --      complete listing data is available.
                 CAST(COALESCE(
                   (SELECT SUM(t.b) FROM (
                     SELECT MAX(unit.bedrooms) AS b
@@ -182,7 +204,7 @@ pub async fn list(
                                       AND parent.suburb        = unit.suburb
                                       AND parent.unit_number   = '')
                      GROUP BY unit.unit_number
-                  ) t),
+                  ) t HAVING COUNT(t.b) >= ds.dwelling_count),
                   (SELECT SUM(t.b) FROM (
                     SELECT MAX(unit.bedrooms) AS b
                       FROM realestate_properties unit
@@ -194,7 +216,11 @@ pub async fn list(
                                       AND parent.suburb        = unit.suburb
                                       AND parent.unit_number   = '')
                      GROUP BY unit.unit_number
-                  ) t)
+                  ) t HAVING COUNT(t.b) >= ds.dwelling_count),
+                  (SELECT MAX(bf.bedrooms) FROM da_build_features bf
+                    WHERE bf.application_id = ca.id
+                      AND bf.template_key = 'build_features_drawings'
+                      AND bf.bedrooms > 0) * NULLIF(ds.dwelling_count, 0)
                 ) AS SIGNED)                                                        AS post_bedrooms,
                 CAST(COALESCE(
                   (SELECT SUM(t.b) FROM (
@@ -208,7 +234,7 @@ pub async fn list(
                                       AND parent.suburb        = unit.suburb
                                       AND parent.unit_number   = '')
                      GROUP BY unit.unit_number
-                  ) t),
+                  ) t HAVING COUNT(t.b) >= ds.dwelling_count),
                   (SELECT SUM(t.b) FROM (
                     SELECT MAX(unit.bathrooms) AS b
                       FROM realestate_properties unit
@@ -220,8 +246,110 @@ pub async fn list(
                                       AND parent.suburb        = unit.suburb
                                       AND parent.unit_number   = '')
                      GROUP BY unit.unit_number
-                  ) t)
-                ) AS SIGNED)                                                        AS post_bathrooms
+                  ) t HAVING COUNT(t.b) >= ds.dwelling_count),
+                  (SELECT MAX(bf.bathrooms) FROM da_build_features bf
+                    WHERE bf.application_id = ca.id
+                      AND bf.template_key = 'build_features_drawings'
+                      AND bf.bathrooms > 0) * NULLIF(ds.dwelling_count, 0)
+                ) AS SIGNED)                                                        AS post_bathrooms,
+                CASE
+                  WHEN (SELECT COUNT(DISTINCT unit.unit_number) FROM domain_properties unit
+                         WHERE unit.unit_number <> ''
+                           AND EXISTS (SELECT 1 FROM domain_properties parent
+                                        WHERE parent.display_address LIKE CONCAT(ds.street_address, '%')
+                                          AND parent.street_number = unit.street_number
+                                          AND parent.street_name   = unit.street_name
+                                          AND parent.suburb        = unit.suburb
+                                          AND parent.unit_number   = '')) >= ds.dwelling_count THEN 'domain'
+                  WHEN (SELECT COUNT(DISTINCT unit.unit_number) FROM realestate_properties unit
+                         WHERE unit.unit_number <> ''
+                           AND EXISTS (SELECT 1 FROM realestate_properties parent
+                                        WHERE parent.display_address LIKE CONCAT(ds.street_address, '%')
+                                          AND parent.street_number = unit.street_number
+                                          AND parent.street_name   = unit.street_name
+                                          AND parent.suburb        = unit.suburb
+                                          AND parent.unit_number   = '')) >= ds.dwelling_count THEN 'realestate'
+                  WHEN EXISTS (SELECT 1 FROM da_build_features bf
+                                WHERE bf.application_id = ca.id
+                                  AND bf.template_key = 'build_features_drawings'
+                                  AND (bf.bedrooms > 0 OR bf.bathrooms > 0))
+                       AND ds.dwelling_count > 0 THEN 'da_docs'
+                  ELSE NULL
+                END                                                                   AS post_rooms_source,
+                -- Project lifecycle for approved DAs:
+                --   built_sold      = at least one post-decision unit sale
+                --   built_unsold    = unit-prefixed property record exists (so
+                --                     someone listed it, even just for rent),
+                --                     OR Google evidence for the unit address
+                --   abandoned_likely = decision_date >3 years old, no signals
+                --   unknown         = approved but too early to tell, or no
+                --                     signals yet
+                -- NULL for non-approved DAs (refused / pending / withdrawn).
+                -- Project lifecycle for approved DAs. The unit-prefixed
+                -- property checks are TIME-GATED to a post-decision sale
+                -- or listing — otherwise stale pre-redev records (e.g. a
+                -- 2008 unit-listing on a lot that was demolished + rebuilt
+                -- in 2025) would falsely classify the new project as
+                -- built_unsold.
+                CASE
+                  WHEN LOWER(COALESCE(ca.decision_outcome, '')) NOT LIKE '%approv%' THEN NULL
+                  WHEN (SELECT COUNT(*)
+                          FROM domain_sales s
+                          JOIN domain_properties unit ON unit.id = s.domain_property_id
+                         WHERE unit.unit_number <> ''
+                           AND EXISTS (SELECT 1 FROM domain_properties parent
+                                        WHERE parent.display_address LIKE CONCAT(ds.street_address, '%')
+                                          AND parent.street_number = unit.street_number
+                                          AND parent.street_name   = unit.street_name
+                                          AND parent.suburb        = unit.suburb
+                                          AND parent.unit_number   = '')
+                           AND s.event_date > ca.decision_date
+                           AND s.is_sold = 1
+                           AND s.event_price IS NOT NULL) > 0 THEN 'built_sold'
+                  WHEN EXISTS (
+                    SELECT 1 FROM domain_properties unit
+                     WHERE unit.unit_number <> ''
+                       AND EXISTS (SELECT 1 FROM domain_properties parent
+                                    WHERE parent.display_address LIKE CONCAT(ds.street_address, '%')
+                                      AND parent.street_number = unit.street_number
+                                      AND parent.street_name   = unit.street_name
+                                      AND parent.suburb        = unit.suburb
+                                      AND parent.unit_number   = '')
+                       AND (
+                         EXISTS (SELECT 1 FROM domain_sales s
+                                  WHERE s.domain_property_id = unit.id
+                                    AND s.event_date > ca.decision_date)
+                         OR EXISTS (SELECT 1 FROM domain_listings dl
+                                     WHERE dl.domain_property_id = unit.id
+                                       AND dl.fetched_at > ca.decision_date)
+                       )
+                  ) THEN 'built_unsold'
+                  WHEN EXISTS (
+                    SELECT 1 FROM realestate_properties unit
+                     WHERE unit.unit_number <> ''
+                       AND EXISTS (SELECT 1 FROM realestate_properties parent
+                                    WHERE parent.display_address LIKE CONCAT(ds.street_address, '%')
+                                      AND parent.street_number = unit.street_number
+                                      AND parent.street_name   = unit.street_name
+                                      AND parent.suburb        = unit.suburb
+                                      AND parent.unit_number   = '')
+                       AND (
+                         EXISTS (SELECT 1 FROM realestate_sales s
+                                  WHERE s.realestate_property_id = unit.id
+                                    AND s.event_date > ca.decision_date)
+                         OR EXISTS (SELECT 1 FROM realestate_listings rl
+                                     WHERE rl.realestate_property_id = unit.id
+                                       AND rl.fetched_at > ca.decision_date)
+                       )
+                  ) THEN 'built_unsold'
+                  WHEN EXISTS (SELECT 1 FROM discovered_urls du
+                                WHERE du.search_address REGEXP CONCAT('^[0-9]+/', SUBSTRING_INDEX(ds.street_address, ',', 1))
+                                  AND du.url_kind IS NOT NULL
+                                  AND du.discovered_at > ca.decision_date) THEN 'built_unsold'
+                  WHEN ca.decision_date IS NOT NULL
+                       AND ca.decision_date < DATE_SUB(CURDATE(), INTERVAL 3 YEAR) THEN 'abandoned_likely'
+                  ELSE 'unknown'
+                END                                                                   AS built_status
            FROM council_applications ca
            __JOIN_KIND__ JOIN da_summaries ds ON ds.application_id = ca.id
           WHERE 1=1",
@@ -555,6 +683,9 @@ fn build_sale_story(r: &MySqlRow) -> Option<pb::SaleStory> {
     let site_area_m2_u: Option<u32> = r.try_get("site_area_m2").ok();
     let site_area_source: Option<String> = r.try_get("site_area_source").ok();
     let pre_source: Option<String> = r.try_get("pre_source").ok();
+    let post_rooms_source: Option<String> = r.try_get("post_rooms_source").ok();
+    let pre_property_type: Option<String> = r.try_get("pre_property_type").ok();
+    let built_status: Option<String> = r.try_get("built_status").ok();
 
     Some(pb::SaleStory {
         pre_price,
@@ -570,5 +701,8 @@ fn build_sale_story(r: &MySqlRow) -> Option<pb::SaleStory> {
         post_bedrooms: post_bedrooms.map(|v| v as i32),
         post_bathrooms: post_bathrooms.map(|v| v as i32),
         site_area_source,
+        post_rooms_source,
+        pre_property_type,
+        built_status,
     })
 }

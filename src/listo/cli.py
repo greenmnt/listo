@@ -91,6 +91,22 @@ def council_list() -> None:
             typer.echo(f"    {b.name:<24}  covers {cov_from} → {cov_to}")
 
 
+@council_app.command("fetch-app-docs")
+def council_fetch_app_docs(
+    app_id: str = typer.Argument(..., help="application_id, e.g. MCU/2020/492"),
+) -> None:
+    """Re-run the docs phase for one application, downloading every
+    listed document (forces LISTO_DOWNLOAD_ALL). Use when phase 1 / 2
+    of the LLM pipeline can't find applicant/builder/architect because
+    the relevant tier-2 docs were never downloaded.
+    """
+    from listo.councils.orchestrator import fetch_app_docs
+
+    apps_done, files_done = fetch_app_docs(app_id)
+    typer.echo(f"  apps:  {apps_done}")
+    typer.echo(f"  files: {files_done}")
+
+
 @council_app.command("scrape")
 def council_scrape(
     slug: str = typer.Argument(..., help="council slug (e.g. cogc, newcastle)"),
