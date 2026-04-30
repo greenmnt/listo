@@ -28,8 +28,8 @@ export const KIND_META: Record<DaKind, KindMeta> = {
   },
   [DaKind.GRANNY]: {
     emoji: "🍏",
-    label: "Granny flat",
-    short: "Granny",
+    label: "Flat",
+    short: "Flat",
     textClass: "text-granny",
     bgClass: "bg-granny/10",
     borderClass: "border-granny/40",
@@ -70,7 +70,7 @@ export const KIND_META: Record<DaKind, KindMeta> = {
 
 export const KIND_FILTER_OPTIONS: { value: string; label: string; emoji: string }[] = [
   { value: "all", label: "All", emoji: "📊" },
-  { value: "granny", label: "Granny", emoji: "🍏" },
+  { value: "granny", label: "Flat", emoji: "🍏" },
   { value: "duplex", label: "Duplex", emoji: "🏘️" },
   { value: "big_dev", label: "Big dev", emoji: "🏗️" },
   { value: "other", label: "Other", emoji: "🏠" },

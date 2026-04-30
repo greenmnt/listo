@@ -6,7 +6,7 @@ import { aud, audCompact, cx, pct } from "../lib/format";
 
 const PRESETS = [
   {
-    label: "Tiny granny flat",
+    label: "Tiny flat",
     emoji: "🍏",
     purchasePrice: 850_000,
     buildCost: 220_000,

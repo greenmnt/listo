@@ -69,6 +69,38 @@ class DocFacts(BaseModel):
     notes: str | None = Field(..., max_length=200, description="Any caveats; <100 chars; null if none")
 
 
+class BuildFeatures(BaseModel):
+    """Physical / cost-driver attributes extracted from drawings, design
+    statements, and specialist reports. Populated per-chunk in the
+    build-features lane and merged in aggregate.
+
+    Every field is null when the chunk doesn't mention it. Long-tail
+    list fields (materials list, plant species, fittings) are stored as
+    short strings rather than nested models — keeps the JSON schema
+    simple for 7B models, which are flaky on nested objects.
+    """
+
+    gfa_m2: int | None = Field(..., ge=0, le=20_000, description="Gross floor area in square metres (sum of all enclosed floor areas) — read from a GFA / area schedule if present, else null")
+    site_area_m2: int | None = Field(..., ge=0, le=200_000, description="Site / lot area in square metres if explicitly stated, else null")
+    internal_area_m2: int | None = Field(..., ge=0, le=20_000, description="Internal / habitable area in m² if stated separately from GFA, else null")
+    external_area_m2: int | None = Field(..., ge=0, le=20_000, description="Outdoor decks / verandas / patios / balconies area in m² if stated, else null")
+    levels: int | None = Field(..., ge=0, le=20, description="Storeys above ground (e.g. 'two-storey duplex' → 2). 0 if explicitly single-storey unstated.")
+    has_basement: bool | None = Field(..., description="True if a basement or sub-floor level is described; null when not mentioned")
+    garage_spaces: int | None = Field(..., ge=0, le=30, description="Number of car spaces in the garage / carport, or null")
+    bedrooms: int | None = Field(..., ge=0, le=50, description="Total bedrooms across all dwellings if stated, or null")
+    bathrooms: int | None = Field(..., ge=0, le=50, description="Total bathrooms across all dwellings if stated, or null")
+    materials_walls: str | None = Field(..., max_length=300, description="External wall materials/finishes — e.g. 'rendered block + timber cladding'. Null if not stated.")
+    materials_roof: str | None = Field(..., max_length=200, description="Roof materials — e.g. 'colorbond, charcoal'. Null if not stated.")
+    materials_floor: str | None = Field(..., max_length=200, description="Internal floor finishes — e.g. 'engineered oak + tiles to wet areas'. Null if not stated.")
+    fittings_quality: Literal["budget", "mid", "premium", "luxury", "unknown"] = Field(..., description="Implied finish tier from fittings/appliances/inclusions described in this chunk; 'unknown' if no signal")
+    fittings_notes: str | None = Field(..., max_length=400, description="Specific high-signal fittings e.g. 'Smeg appliances, stone benchtops, fireplace, ducted AC' — null if absent")
+    landscaping_summary: str | None = Field(..., max_length=400, description="One-line summary of landscape design/spec — e.g. 'native + tropical mix, paved driveway, in-ground pool'. Null if absent.")
+    plant_species: list[str] = Field(..., max_length=80, description="Plant species or common names listed in landscape plans (empty list if none). Use the most common form found.")
+    has_pool: bool | None = Field(..., description="True if an in-ground or above-ground swimming pool is part of the proposal; null if not mentioned")
+    confidence: Literal["high", "medium", "low"] = Field(..., description="Self-rated confidence in this chunk's extraction overall")
+    notes: str | None = Field(..., max_length=300, description="Free-form caveats / things you noticed but didn't have a field for. Null if none.")
+
+
 def is_complete(
     *,
     dwelling_count: int | None,

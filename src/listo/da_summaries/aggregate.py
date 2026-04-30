@@ -65,6 +65,53 @@ def _first_non_null(rows: list[DaDocSummary], order: list[str], field: str) -> t
     return None, None
 
 
+def _splice_street_number(raw_address: str | None, street_address: str | None) -> str | None:
+    """If `street_address` is missing a leading street number, look in
+    `raw_address` for `<number> <street_name>` and prepend it.
+
+    Why: the LLM occasionally drops the street number when raw_address
+    has a "Lot N SPnnnnn," prefix (e.g. raw="Lot 2 SP304034, 15 Matasha
+    Crescent, PIMPAMA QLD 4209" → street="Matasha Crescent, Pimpama, QLD
+    4209"). Without the number, downstream LIKE matches against
+    domain_properties / realestate_properties.display_address fail.
+    """
+    if not street_address or not raw_address:
+        return street_address
+    if re.match(r"^\s*\d", street_address):
+        return street_address
+    street_name = street_address.split(",", 1)[0].strip()
+    if not street_name:
+        return street_address
+    # Match a number-prefixed token (allowing 1A, 1-3, 1/15) followed by
+    # the street name. Skip "Lot N" / "SPnnnn" prefixes by anchoring on
+    # the street name itself.
+    pattern = rf"(\d+[A-Za-z]?(?:[-/]\d+[A-Za-z]?)?)\s+{re.escape(street_name)}"
+    m = re.search(pattern, raw_address, re.IGNORECASE)
+    if not m:
+        return street_address
+    return f"{m.group(1)} {street_address}"
+
+
+def _canonicalise_street_address(street_address: str | None) -> str | None:
+    """Normalise punctuation so LIKE matches against domain_properties
+    /realestate_properties.display_address succeed.
+
+    The LLM commonly emits ", Suburb, STATE PCODE" but Domain stores
+    ", Suburb STATE PCODE" (no comma before the state). We strip that
+    extra comma so the prefix match works.
+    """
+    if not street_address:
+        return street_address
+    # ", <STATE> <pc>" at end → " <STATE> <pc>"
+    normalised = re.sub(
+        r",\s*(QLD|NSW|VIC|TAS|WA|SA|NT|ACT)\s+(\d{4})\s*$",
+        r" \1 \2",
+        street_address,
+        flags=re.IGNORECASE,
+    )
+    return normalised
+
+
 # ---------- companies upsert ----------
 
 
@@ -228,10 +275,21 @@ def _aggregate_one(s, app_pk: int, prompt_version: str) -> str:
           FROM council_application_documents WHERE application_id = :app_pk
     """), {"app_pk": app_pk}).fetchone()
 
-    days_lodge_to_decide_row = s.execute(sql_text("""
-        SELECT DATEDIFF(decision_date, lodged_date) AS d
+    ca_row = s.execute(sql_text("""
+        SELECT DATEDIFF(decision_date, lodged_date) AS d, raw_address
           FROM council_applications WHERE id = :app_pk
     """), {"app_pk": app_pk}).fetchone()
+    days_lodge_to_decide_row = ca_row  # back-compat alias for downstream code
+
+    # Splice a street number in from raw_address when the LLM dropped it
+    # (typically when raw_address has a "Lot N SPnnn," prefix), then
+    # canonicalise punctuation. Without these, the API's LIKE-based
+    # property matches against domain_properties.display_address fail.
+    if fields.get("street_address") and ca_row is not None:
+        spliced = _splice_street_number(
+            ca_row.raw_address, fields.get("street_address")
+        )
+        fields["street_address"] = _canonicalise_street_address(spliced)
 
     n_docs_summarised = sum(1 for r in rows if r.extraction_method != "skipped")
 

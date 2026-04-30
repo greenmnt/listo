@@ -11,6 +11,7 @@ from listo.db import session_scope
 from listo.da_summaries import aggregate as agg_mod
 from listo.da_summaries import businesses as biz_mod
 from listo.da_summaries import escalate as esc_mod
+from listo.da_summaries import features as feat_mod
 from listo.da_summaries import summarise as sum_mod
 from listo.da_summaries.schemas import PROMPT_VERSION
 
@@ -75,6 +76,37 @@ def escalate(
     typer.echo(f"  docs processed:         {stats.docs_processed}")
     typer.echo(f"  docs skipped (no text): {stats.docs_skipped_no_text}")
     typer.echo(f"  docs failed:            {stats.docs_failed}")
+
+
+# ---------- features ----------
+
+
+@da_app.command("features")
+def features(
+    slug: str = typer.Option(None, "--slug"),
+    app_id: str = typer.Option(None, "--app-id"),
+    limit: int = typer.Option(None, "--limit"),
+    force: bool = typer.Option(False, "--force", help="re-extract even if rows exist for this (doc, version, template_key)"),
+    model: str = typer.Option(None, "--model"),
+    prompt_version: str = typer.Option("v4", "--prompt-version"),
+    chunk_size: int = typer.Option(5, "--chunk-size", help="pages per chunk"),
+    chunk_overlap: int = typer.Option(1, "--chunk-overlap", help="page overlap between chunks"),
+    computer_index: int = typer.Option(0, "--computer-index"),
+    computer_count: int = typer.Option(1, "--computer-count"),
+) -> None:
+    """Phase 2.5: extract physical/build-cost features from drawings + design reports."""
+    stats = feat_mod.run(
+        council_slug=slug, app_id_str=app_id, limit=limit, force=force,
+        model=model, prompt_version=prompt_version,
+        chunk_size=chunk_size, chunk_overlap=chunk_overlap,
+        computer_index=computer_index, computer_count=computer_count,
+    )
+    typer.echo("")
+    typer.echo(f"  apps visited:           {stats.apps_visited}")
+    typer.echo(f"  docs processed:         {stats.docs_processed}")
+    typer.echo(f"  docs skipped (no text): {stats.docs_skipped_no_text}")
+    typer.echo(f"  chunks processed:       {stats.chunks_processed}")
+    typer.echo(f"  chunks failed:          {stats.chunks_failed}")
 
 
 # ---------- aggregate ----------

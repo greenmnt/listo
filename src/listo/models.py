@@ -700,6 +700,58 @@ class DocumentFeatures(Base):
     extraction_notes: Mapped[str | None] = mapped_column(Text)
 
 
+class DaBuildFeatures(Base):
+    """Per-chunk physical / build-cost extractions (build-features lane).
+
+    One row per (document_id, prompt_version, template_key, chunk_index).
+    Chunked so 80-page specialist reports get split into ~5-page windows.
+    Aggregator merges chunks → per-document → per-application.
+    """
+    __tablename__ = "da_build_features"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    application_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("council_applications.id"), nullable=False
+    )
+    document_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("council_application_documents.id"), nullable=False
+    )
+    doc_type: Mapped[str | None] = mapped_column(String(120))
+    prompt_version: Mapped[str] = mapped_column(String(20), nullable=False)
+    template_key: Mapped[str] = mapped_column(String(40), nullable=False)
+    model: Mapped[str] = mapped_column(String(80), nullable=False)
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    page_start: Mapped[int] = mapped_column(Integer, nullable=False)
+    page_end: Mapped[int] = mapped_column(Integer, nullable=False)
+    extracted_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    extraction_method: Mapped[str] = mapped_column(String(20), nullable=False)
+    text_chars: Mapped[int | None] = mapped_column(Integer)
+
+    gfa_m2: Mapped[int | None] = mapped_column(Integer)
+    site_area_m2: Mapped[int | None] = mapped_column(Integer)
+    internal_area_m2: Mapped[int | None] = mapped_column(Integer)
+    external_area_m2: Mapped[int | None] = mapped_column(Integer)
+    levels: Mapped[int | None] = mapped_column(SmallInteger)
+    has_basement: Mapped[bool | None] = mapped_column()
+    garage_spaces: Mapped[int | None] = mapped_column(SmallInteger)
+    bedrooms: Mapped[int | None] = mapped_column(SmallInteger)
+    bathrooms: Mapped[int | None] = mapped_column(SmallInteger)
+
+    materials_walls: Mapped[str | None] = mapped_column(String(300))
+    materials_roof: Mapped[str | None] = mapped_column(String(200))
+    materials_floor: Mapped[str | None] = mapped_column(String(200))
+    fittings_quality: Mapped[str | None] = mapped_column(String(20))
+    fittings_notes: Mapped[str | None] = mapped_column(String(400))
+
+    landscaping_summary: Mapped[str | None] = mapped_column(String(400))
+    plant_species_json: Mapped[list | None] = mapped_column(JSON)
+    has_pool: Mapped[bool | None] = mapped_column()
+
+    confidence: Mapped[str | None] = mapped_column(String(10))
+    notes: Mapped[str | None] = mapped_column(String(300))
+    raw_response_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
 class BusinessLink(Base):
     __tablename__ = "business_links"
 

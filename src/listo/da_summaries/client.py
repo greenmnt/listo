@@ -17,7 +17,7 @@ import os
 from dataclasses import dataclass
 
 import ollama
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from listo.da_summaries.schemas import DocFacts
 
@@ -32,6 +32,13 @@ DEFAULT_HOST = os.environ.get("LISTO_OLLAMA_HOST", "http://127.0.0.1:11434")
 @dataclass
 class ExtractResult:
     facts: DocFacts
+    model: str
+    raw_response: dict
+
+
+@dataclass
+class GenericExtractResult[ParsedT]:
+    parsed: ParsedT
     model: str
     raw_response: dict
 
@@ -99,3 +106,80 @@ class OllamaExtractor:
         else:
             raw = {"content": content}
         return ExtractResult(facts=facts, model=self.model, raw_response=raw)
+
+    def extract_as[ParsedT: BaseModel](
+        self,
+        schema_class: type[ParsedT],
+        *,
+        system: str,
+        user: str,
+        num_ctx: int = 12288,
+        num_predict: int = 1024,
+    ) -> GenericExtractResult[ParsedT]:
+        """Generic schema extraction. The LLM is constrained to JSON
+        matching `schema_class.model_json_schema()` and the result is
+        parsed via `schema_class.model_validate_json`.
+
+        Used by the build-features lane (BuildFeatures schema) and any
+        future lane that needs a non-DocFacts schema. Same retry-once
+        behaviour as `extract()`.
+        """
+        json_schema = schema_class.model_json_schema()
+        try:
+            return self._call_generic(
+                schema_class, json_schema,
+                system=system, user=user,
+                num_ctx=num_ctx, num_predict=num_predict,
+            )
+        except (json.JSONDecodeError, ValidationError) as first_err:
+            nudge = (
+                user
+                + "\n\nYour last reply was not valid JSON matching the schema. "
+                + "Reply ONLY with a JSON object — no prose, no code fences."
+            )
+            try:
+                return self._call_generic(
+                    schema_class, json_schema,
+                    system=system, user=nudge,
+                    num_ctx=num_ctx, num_predict=num_predict,
+                )
+            except (json.JSONDecodeError, ValidationError) as second_err:
+                raise OllamaError(
+                    f"two consecutive JSON-parse failures: {first_err!r} → {second_err!r}"
+                ) from second_err
+        except Exception as exc:  # noqa: BLE001
+            raise OllamaError(f"ollama call failed: {exc!r}") from exc
+
+    def _call_generic[ParsedT: BaseModel](
+        self,
+        schema_class: type[ParsedT],
+        json_schema: dict,
+        *,
+        system: str,
+        user: str,
+        num_ctx: int,
+        num_predict: int,
+    ) -> GenericExtractResult[ParsedT]:
+        resp = self.client.chat(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            format=json_schema,
+            options={
+                "temperature": 0,
+                "num_ctx": num_ctx,
+                "num_predict": num_predict,
+            },
+        )
+        msg = resp["message"] if isinstance(resp, dict) else resp.message
+        content = msg["content"] if isinstance(msg, dict) else msg.content
+        parsed = schema_class.model_validate_json(content)
+        if hasattr(resp, "model_dump"):
+            raw = resp.model_dump()
+        elif isinstance(resp, dict):
+            raw = resp
+        else:
+            raw = {"content": content}
+        return GenericExtractResult(parsed=parsed, model=self.model, raw_response=raw)

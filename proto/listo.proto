@@ -74,6 +74,7 @@ message ListApplicationsRequest {
   optional string q = 6;          // free-text search across description/address/app_id
   optional uint32 limit = 7;      // 1..=500, default 50
   optional uint32 offset = 8;
+  optional bool analyzed_only = 9; // restrict to apps with a da_summaries row
 }
 
 message ListApplicationsResponse {
@@ -147,8 +148,17 @@ message SaleStory {
   // Each post-build unit's most recent sale. UI uses this to show
   // '1/124 sold $1.9m, 2/124 sold $1.85m' alongside a 'X / Y units sold' percent.
   repeated UnitSale unit_sales = 7;
-  // Lot land area from the matched parent property record (Domain).
+  // Lot land area, with fallback chain: domain → realestate → da_docs.
   optional int32 site_area_m2 = 8;
+  // Pre-redev parent dwelling room counts.
+  optional int32 pre_bedrooms = 9;
+  optional int32 pre_bathrooms = 10;
+  // Post-redev — sum across all unit-prefixed children.
+  optional int32 post_bedrooms = 11;
+  optional int32 post_bathrooms = 12;
+  // Where site_area_m2 came from. 'domain' | 'realestate' | 'da_docs'.
+  // 'da_docs' = LLM-extracted from drawings/plans — show with uncertainty.
+  optional string site_area_source = 13;
 }
 
 message UnitSale {

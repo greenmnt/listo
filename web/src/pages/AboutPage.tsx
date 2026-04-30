@@ -4,7 +4,7 @@ export default function AboutPage() {
       <header>
         <h1 className="text-2xl font-semibold">ℹ️ About Listo</h1>
         <p className="text-muted mt-2">
-          A radar for duplex / granny-flat / multi-unit redevelopments across
+          A radar for duplex / flat / multi-unit redevelopments across
           Australian coastal councils. Initially Gold Coast (QLD); Newcastle
           and other coastal LGAs to follow.
         </p>
@@ -47,7 +47,7 @@ export default function AboutPage() {
           <Term k="ROL" v="Reconfiguration of a Lot — subdividing, amalgamating or boundary realignments." />
           <Term k="OPW" v="Operational Works — earthworks, vegetation, civil works." />
           <Term k="Dual occupancy" v="Two attached or detached dwellings on one lot. Aka duplex." />
-          <Term k="Secondary dwelling" v="Granny flat — smaller dwelling secondary to the main house." />
+          <Term k="Secondary dwelling" v="Flat — smaller dwelling secondary to the main house." />
           <Term k="Big dev" v="Listo's bucket for 3+ unit residential developments (triplex, townhouses, apartments)." />
         </dl>
       </section>

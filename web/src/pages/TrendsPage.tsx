@@ -93,7 +93,7 @@ export default function TrendsPage() {
                     dataKey="granny"
                     stackId="a"
                     fill={KIND_META[DaKind.GRANNY].hex}
-                    name="🍏 Granny"
+                    name="🍏 Flat"
                   />
                   <Bar
                     dataKey="duplex"

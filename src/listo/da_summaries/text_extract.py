@@ -212,3 +212,120 @@ def extract_text_for_prompt(
 
     # docx / image / html — skip in v1. Hot path is PDFs (98% of corpus).
     return ExtractedText(None, "skipped", None, f"unsupported mime: {mime_type or p.suffix}")
+
+
+# ---------- per-page extraction (used by features lane / chunking) ----------
+
+
+@dataclass
+class PerPageExtract:
+    """Page-by-page text without the entity lane's pick_pages filtering or
+    char cap. Empty strings for image-only pages. Used by the build-features
+    lane — the chunker walks these and produces overlapping windows."""
+
+    pages: list[str]
+    method: str  # 'pymupdf' | 'docx' | 'skipped'
+    notes: str | None
+
+
+# Synthetic "page" size for docx (which has no real pages).
+_DOCX_SYNTH_PAGE_CHARS = 3_000
+
+
+def _extract_pdf_per_page(path: Path) -> PerPageExtract:
+    try:
+        with pymupdf.open(path) as pdf:
+            pages = [(pdf[i].get_text("text") or "").strip() for i in range(pdf.page_count)]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("pymupdf failed on %s: %s", path, exc)
+        return PerPageExtract([], "skipped", f"pymupdf error: {exc}")
+    nonempty = sum(1 for p in pages if len(p) >= MIN_USABLE_CHARS)
+    if nonempty == 0:
+        return PerPageExtract(pages, "skipped", "no extractable text (likely scanned image)")
+    return PerPageExtract(pages, "pymupdf", None)
+
+
+def _extract_docx_text(path: Path) -> str | None:
+    """Flat text from a .docx — stdlib only. Reads word/document.xml and
+    pulls the contents of every <w:t> element in document order. Misses
+    headers/footers (rarely matter for DA reports) but captures body text
+    + tables, which is all we need for the Express DA Report use case."""
+    import zipfile
+    from xml.etree import ElementTree as ET
+
+    try:
+        with zipfile.ZipFile(path) as zf:
+            with zf.open("word/document.xml") as f:
+                xml_bytes = f.read()
+    except (KeyError, zipfile.BadZipFile, OSError) as exc:
+        logger.warning("docx unzip failed on %s: %s", path, exc)
+        return None
+
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError as exc:
+        logger.warning("docx xml parse failed on %s: %s", path, exc)
+        return None
+
+    out: list[str] = []
+    # Iterate paragraphs in document order; emit one line per paragraph,
+    # joining all <w:t> runs inside it. This preserves the docx's block
+    # structure better than a flat <w:t> walk.
+    for para in root.iter(f"{{{ns['w']}}}p"):
+        runs = [t.text or "" for t in para.iter(f"{{{ns['w']}}}t")]
+        line = "".join(runs).strip()
+        if line:
+            out.append(line)
+    return "\n".join(out) if out else None
+
+
+def _extract_docx_per_page(path: Path) -> PerPageExtract:
+    text = _extract_docx_text(path)
+    if not text or len(text) < MIN_USABLE_CHARS:
+        return PerPageExtract([], "skipped", "docx had no extractable body text")
+
+    # Synthesize "pages" of ~3K chars each. Break on paragraph boundaries
+    # (the \n we emitted) so a chunk doesn't end mid-sentence.
+    pages: list[str] = []
+    buf: list[str] = []
+    buf_len = 0
+    for para in text.split("\n"):
+        para_len = len(para) + 1
+        if buf_len + para_len > _DOCX_SYNTH_PAGE_CHARS and buf:
+            pages.append("\n".join(buf))
+            buf = []
+            buf_len = 0
+        buf.append(para)
+        buf_len += para_len
+    if buf:
+        pages.append("\n".join(buf))
+    return PerPageExtract(pages, "docx", None)
+
+
+def extract_per_page(
+    *, file_path: str | None, mime_type: str | None
+) -> PerPageExtract:
+    """Per-page text for the chunked extractors (build_features lane).
+
+    Unlike `extract_text_for_prompt` this does NOT cap total chars or apply
+    a pick_pages policy — the caller (chunker) is expected to window the
+    output. Empty strings are preserved for image-only PDF pages so page
+    indices stay aligned with the source.
+    """
+    if not file_path:
+        return PerPageExtract([], "skipped", "no file_path on record")
+    p = Path(file_path)
+    if not p.exists():
+        return PerPageExtract([], "skipped", f"file not found on disk: {file_path}")
+
+    mt = (mime_type or "").lower()
+    suffix = p.suffix.lower()
+    if mt.startswith("application/pdf") or suffix == ".pdf":
+        return _extract_pdf_per_page(p)
+    if (
+        mt.startswith("application/vnd.openxmlformats-officedocument.wordprocessingml")
+        or suffix == ".docx"
+    ):
+        return _extract_docx_per_page(p)
+    return PerPageExtract([], "skipped", f"unsupported mime: {mime_type or suffix}")

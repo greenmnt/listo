@@ -271,6 +271,135 @@ NEVER substitute a plausible-sounding real name for a placeholder. If the \
 document does not state a field, use null. Do not guess from training data."""
 
 
+# ---------- v4: build-features lane ----------
+#
+# Different schema (BuildFeatures, not DocFacts) and a different system
+# prompt — the entity guidance is irrelevant here. Two user templates:
+# one for architectural drawings (title-block + dimension labels) and one
+# for prose design statements (Express DA Reports, planning narrative).
+
+SYSTEM_PROMPT_BUILD_V4 = """You extract physical / build-cost attributes \
+from one chunk of a Queensland Development Application document. Each \
+chunk is a window of pages from a larger file — the relevant facts may \
+or may not be in this particular chunk.
+
+Output ONLY valid JSON matching the provided schema. Do not include \
+prose, code fences, or commentary outside the JSON.
+
+If a field is not stated in this chunk, use null (or empty list for \
+plant_species, 'unknown' for fittings_quality, false-only-when-explicit \
+for booleans). NEVER guess. NEVER carry over assumptions from typical \
+suburban duplexes — extract only what the text states.
+
+What to look for:
+
+GFA / areas (m²):
+- 'GFA' / 'Gross Floor Area' / 'Gross Building Area' / 'Total Area'
+- 'Floor Area Schedule' / 'Area Calculation' tables
+- 'Site Area' / 'Lot Area' (the parcel size)
+- Multiple dwellings? gfa_m2 should be the SUM across all dwellings
+- If only one dwelling's GFA is given, put it in gfa_m2 anyway and note
+  the count in `notes`
+
+Levels / storeys:
+- '2-storey' / 'two-storey' / 'double-storey' → levels=2
+- '3-level' / 'three-level' → levels=3
+- 'split-level' → take the highest above-ground floor count
+- 'lower ground' / 'basement' → has_basement=true
+- Levels above ground only — basements counted via has_basement, not levels
+
+Garage / parking:
+- 'double garage' → garage_spaces=2
+- 'single garage' → garage_spaces=1
+- '4 car spaces' → garage_spaces=4
+- 'tandem' / 'side-by-side' just describes layout — count the spaces
+
+Materials (be specific, copy phrases verbatim if short):
+- materials_walls: 'rendered masonry', 'lightweight timber cladding',
+  'face brick', 'split-block', 'compressed fibre cement sheet', etc.
+- materials_roof: 'Colorbond Monument', 'concrete tile', 'metal sheet'
+- materials_floor: 'engineered oak floorboards', 'porcelain tile to wet
+  areas', 'polished concrete'
+
+Fittings tier — pick from {budget, mid, premium, luxury, unknown}:
+- budget: standard inclusions, no brand mentions
+- mid: 'quality finishes', some brand mentions (Caesarstone, Westinghouse)
+- premium: 'high-end finishes', stone benches throughout, branded
+  appliances (Smeg, Miele, Fisher & Paykel), engineered timber, tiled
+  pool surrounds
+- luxury: 'designer', 'European appliances', wine fridge, butler's
+  pantry, smart home, lift, full-height windows, marble
+- unknown: not stated
+
+Landscape:
+- landscaping_summary: one-line gist of the planting/hardscape character
+- plant_species: list ONLY when an actual species/cultivar list is given.
+  Common name is fine ('Coastal Banksia', 'Kentia Palm'). Skip generic
+  mentions like 'native plants' or 'tropical garden' (no list).
+
+Pool:
+- has_pool=true if an in-ground or above-ground pool / lap pool /
+  plunge pool is part of the proposal.
+- has_pool=false if the chunk explicitly says no pool.
+- has_pool=null otherwise.
+
+Set confidence='high' when the chunk explicitly states most fields you \
+returned non-null, 'medium' when fields were inferred from a single \
+table or sentence, 'low' when much was guessed from sparse signals."""
+
+
+_USER_BUILD_DRAWINGS_V4 = """You are reading pages {page_start}-{page_end} of a multi-page architectural drawings PDF for application {app_id}.
+
+Drawings carry build-feature info in:
+1. Title blocks (sheet header: project name, GFA, site area, scale)
+2. Sheet schedules / cover sheet (drawing list + summary tables)
+3. Floor plan annotations (room sizes, 'M.BED 4.2 x 3.6')
+4. Elevations (storey count, materials labels with leader lines)
+5. Section markers (basement / sub-floor)
+6. Schedules at the back (door schedule, window schedule, finishes
+   schedule, area schedule)
+
+Be conservative — drawing text is sparse. If a field requires a number
+not present in this chunk, use null. Do NOT invent a GFA from room
+dimensions you can see in the floor plan; only extract a GFA total that
+the document explicitly states.
+
+If this is page 1 of the set (it usually carries the schedules), expect \
+to populate gfa_m2 / site_area_m2 / levels / garage_spaces from the title \
+block. If this is a deeper page (elevations, sections), expect mostly \
+materials_* and has_basement signals.
+
+DOCUMENT TEXT (pages {page_start}-{page_end}):
+{text}
+
+Output the BuildFeatures JSON now."""
+
+
+_USER_BUILD_DESIGN_REPORT_V4 = """You are reading pages {page_start}-{page_end} of a planning / design narrative document for application {app_id} (e.g. Express DA Report, Town Planning Report, Statement of Development Compliance, Specialist Report).
+
+These documents describe the proposal in prose. Extract:
+
+- Overall area figures (GFA, site area, internal vs. external m²) — \
+usually in 'Section 2: The Site' or 'Section 3: The Proposal'
+- Storey count + basement
+- Garage capacity (look for 'parking provision' / 'on-site parking')
+- Material palette (often a numbered list under 'External Finishes' / \
+'Building Materials')
+- Landscaping: scope + plant lists (look for an appendix or a 'Landscape \
+Concept' section)
+- Fittings tier — narrative documents often signal this with adjectives \
+('high-end', 'designer', 'budget', 'standard inclusions')
+
+Be careful with code-of-assessment / compliance text — phrases like \
+'Code Assessable Development' are jurisdictional, not material/build \
+properties. Skip those.
+
+DOCUMENT TEXT (pages {page_start}-{page_end}):
+{text}
+
+Output the BuildFeatures JSON now."""
+
+
 # (prompt_version, template_key) -> Template
 TEMPLATES: dict[tuple[str, str], Template] = {
     # v1 retained as historical record. New runs use v2 (set by
@@ -353,6 +482,22 @@ TEMPLATES: dict[tuple[str, str], Template] = {
         "generic", SYSTEM_PROMPT_V3, _USER_GENERIC_V1,
         "v3: example placeholders + 'do not invent names' guard",
     ),
+    # v4 — build-features lane (different schema, BuildFeatures). The
+    # template_key identifies the document's character (drawings vs prose),
+    # not the council's doc_type label, so the same template covers
+    # 'Drawings' / 'Stamped Approved Plans' / 'Plans'.
+    ("v4", "build_features_drawings"): Template(
+        "build_features_drawings",
+        SYSTEM_PROMPT_BUILD_V4,
+        _USER_BUILD_DRAWINGS_V4,
+        "v4: build-features extraction from architectural drawings (title-blocks + schedules)",
+    ),
+    ("v4", "build_features_design_report"): Template(
+        "build_features_design_report",
+        SYSTEM_PROMPT_BUILD_V4,
+        _USER_BUILD_DESIGN_REPORT_V4,
+        "v4: build-features extraction from prose planning/design narrative (Express DA Report, specialist text)",
+    ),
 }
 
 
@@ -393,10 +538,15 @@ def render(
     template_key: str | None = None,
     text: str,
     app_id: str,
+    extra: dict[str, object] | None = None,
 ) -> tuple[Template, str]:
     """Render a prompt. Caller can pass `template_key` directly (preferred —
     upstream classifier picks the template based on PDF features), or
     `doc_type` for legacy doc-type-based routing.
+
+    `extra` carries additional `{placeholder}` substitutions (e.g.
+    page_start/page_end for the build-features chunked templates). They
+    must be present in the template body or `str.format` raises KeyError.
 
     Returns (Template, rendered_user).
     """
@@ -408,8 +558,42 @@ def render(
         tpl = get_template(prompt_version=prompt_version, doc_type=doc_type)
     # str.format() — escape any stray braces in `text`.
     safe_text = text.replace("{", "{{").replace("}", "}}")
-    rendered_user = tpl.user_template.format(text=safe_text, app_id=app_id)
+    fmt: dict[str, object] = {"text": safe_text, "app_id": app_id}
+    if extra:
+        fmt.update(extra)
+    rendered_user = tpl.user_template.format(**fmt)
     return tpl, rendered_user
+
+
+# ---------- build-features lane: doc_type → template_key ----------
+
+
+# Doc-type substring patterns the build-features lane runs on. Each
+# entry is matched with `LIKE '%<pattern>%'`, so prefer singular forms
+# that subsume the plural ('Drawing' covers 'Drawings'; 'Specialist
+# Report' covers both forms). 'Plans' kept plural — 'Plan' on its own
+# matches 'Planner' / 'Planning' / 'Plant' which are not build docs.
+BUILD_DOC_TYPES = [
+    "Drawing",
+    "Stamped Approved Plan",
+    "Plans",
+    "Supporting Document",
+    "Specialist Report",
+]
+
+
+def select_build_template_key(doc_type: str | None) -> str:
+    """Map a doc_type to the right v4 build_features template_key.
+
+    Drawings / Plans / Stamped Approved Plans → 'drawings' template
+    (architectural; expects sparse text + title-block schedules).
+    Supporting Documents / Specialist Reports → 'design_report' template
+    (prose narrative; expects sections + appendices).
+    """
+    dt = (doc_type or "").lower()
+    if "drawing" in dt or "plan" in dt:
+        return "build_features_drawings"
+    return "build_features_design_report"
 
 
 def register_templates(prompt_version: str | None = None) -> int:
