@@ -13,6 +13,7 @@ from listo.da_summaries import builtcheck as built_mod
 from listo.da_summaries import businesses as biz_mod
 from listo.da_summaries import escalate as esc_mod
 from listo.da_summaries import features as feat_mod
+from listo.da_summaries import harvest_entities as he_mod
 from listo.da_summaries import summarise as sum_mod
 from listo.da_summaries.schemas import PROMPT_VERSION
 
@@ -180,6 +181,44 @@ def businesses(
     typer.echo(f"  medium confidence:  {stats.persisted_medium}")
     typer.echo(f"  low confidence:     {stats.persisted_low}")
     typer.echo(f"  no match:           {stats.persisted_no_match}")
+
+
+# ---------- harvest-entities ----------
+
+
+@da_app.command("harvest-entities")
+def harvest_entities(
+    app_id: str = typer.Option(None, "--app-id", help="single application code, e.g. COM/2021/115"),
+    limit: int = typer.Option(None, "--limit", help="cap docs processed this run"),
+) -> None:
+    """Tier-0 entity harvest: regex-parse COGC correspondence into application_entities.
+
+    Walks council_application_documents whose doc_type looks like council
+    correspondence (Decision/Confirmation Notice, Cover Letter, Information
+    Request) and whose extracted_text is populated. Splits multi-name
+    recipients ("Peter Dawson and Noela Roberts") into separate companies +
+    application_entities rows. Idempotent.
+    """
+    app_pk: int | None = None
+    if app_id:
+        with session_scope() as s:
+            row = s.execute(sql_text(
+                "SELECT id FROM council_applications WHERE application_id = :a LIMIT 1"
+            ), {"a": app_id}).fetchone()
+            if row is None:
+                typer.echo(f"no application with code {app_id!r}")
+                raise typer.Exit(1)
+            app_pk = row.id
+
+    stats = he_mod.harvest_all(app_pk=app_pk, limit=limit)
+    typer.echo("")
+    typer.echo(f"  docs scanned:       {stats['docs_seen']}")
+    typer.echo(f"  text extracted now: {stats['docs_text_extracted']}")
+    typer.echo(f"  text skipped:       {stats['docs_text_skipped']}")
+    typer.echo(f"  cogc letters:       {stats['docs_cogc']}")
+    typer.echo(f"  emissions:          {stats['emissions']}")
+    typer.echo(f"  entity rows:        {stats['entity_rows_written']}")
+    typer.echo(f"  distinct companies: {stats['companies_seen']}")
 
 
 # ---------- prompts ----------

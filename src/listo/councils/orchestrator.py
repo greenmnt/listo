@@ -300,8 +300,20 @@ def run_council(
     detail_limit: int | None = None,
     docs_limit: int | None = None,
     doc_dir: Path = DEFAULT_DOC_DIR,
+    allowed_type_codes: set[str] | None = None,
 ) -> dict:
-    """Run all configured backends for a council across the date window."""
+    """Run all configured backends for a council across the date window.
+
+    `allowed_type_codes`, when provided, restricts the heavy work
+    (detail page fetch + document downloads) to applications whose
+    type-code prefix is in the set. The list phase still walks every
+    row in the date window so list_first_seen_at is populated for
+    every DA — non-residential rows just don't get the per-app
+    drill-in. Pass `None` (default) to fetch everything.
+    """
+    allow = (
+        {t.upper() for t in allowed_type_codes} if allowed_type_codes else None
+    )
     stats = {"list": 0, "detail": 0, "docs": 0, "doc_files": 0}
     for backend in council.backends:
         if not backend.covers(date_from=date_from, date_to=date_to):
@@ -324,13 +336,17 @@ def run_council(
             list_count = detail_count = docs_apps = docs_files = 0
             try:
                 if do_list:
-                    list_count = _phase_list(scraper, sink, date_from=lo, date_to=hi)
+                    list_count = _phase_list(
+                        scraper, sink, date_from=lo, date_to=hi,
+                        allowed_type_codes=allow,
+                    )
                     stats["list"] += list_count
                 if do_detail:
                     detail_count = _phase_detail(
                         scraper, sink,
                         council_slug=scraper.council_slug, vendor=scraper.vendor,
                         date_from=lo, date_to=hi, limit=detail_limit,
+                        allowed_type_codes=allow,
                     )
                     stats["detail"] += detail_count
                 if do_docs:
@@ -338,6 +354,7 @@ def run_council(
                         scraper, sink,
                         council_slug=scraper.council_slug, vendor=scraper.vendor,
                         date_from=lo, date_to=hi, limit=docs_limit, doc_dir=doc_dir,
+                        allowed_type_codes=allow,
                     )
                     stats["docs"] += docs_apps
                     stats["doc_files"] += docs_files
@@ -405,8 +422,13 @@ def _finish_scrape_window(
         )
 
 
-def _phase_list(scraper, sink, *, date_from: date, date_to: date) -> int:
+def _phase_list(
+    scraper, sink, *, date_from: date, date_to: date,
+    allowed_type_codes: set[str] | None = None,
+) -> int:
     logger.info("=== phase: list (%s..%s) ===", date_from, date_to)
+    if allowed_type_codes:
+        logger.info("phase list: type-code allowlist = %s", sorted(allowed_type_codes))
     # Skip applications that already completed on a previous run. The
     # scraper still walks the same pages (ePathway pagination is a
     # postback chain — random access isn't available), but it yields
@@ -430,6 +452,7 @@ def _phase_list(scraper, sink, *, date_from: date, date_to: date) -> int:
     for row in scraper.iter_listings(
         date_from=date_from, date_to=date_to, sink=sink,
         skip_application_ids=already_done,
+        allowed_type_codes=allowed_type_codes,
     ):
         app_pk = upsert_listing(row)
         # Vendors like Infor ePathway resolve the detail page during the
@@ -464,6 +487,7 @@ def _phase_detail(
     scraper, sink, *,
     council_slug: str, vendor: str,
     date_from: date, date_to: date, limit: int | None,
+    allowed_type_codes: set[str] | None = None,
 ) -> int:
     """Fetch detail for applications in window with detail_fetched_at IS NULL."""
     with session_scope() as s:
@@ -475,6 +499,8 @@ def _phase_detail(
             .where(CouncilApplication.lodged_date.between(date_from, date_to))
             .order_by(CouncilApplication.lodged_date.asc(), CouncilApplication.id.asc())
         )
+        if allowed_type_codes:
+            q = q.where(CouncilApplication.type_code.in_(allowed_type_codes))
         if limit is not None:
             q = q.limit(limit)
         pending = s.execute(q).all()
@@ -586,6 +612,7 @@ def _phase_docs(
     council_slug: str, vendor: str,
     date_from: date, date_to: date, limit: int | None,
     doc_dir: Path,
+    allowed_type_codes: set[str] | None = None,
 ) -> tuple[int, int]:
     """Download documents for applications with detail but no docs."""
     with session_scope() as s:
@@ -598,6 +625,8 @@ def _phase_docs(
             .where(CouncilApplication.lodged_date.between(date_from, date_to))
             .order_by(CouncilApplication.lodged_date.asc(), CouncilApplication.id.asc())
         )
+        if allowed_type_codes:
+            q = q.where(CouncilApplication.type_code.in_(allowed_type_codes))
         if limit is not None:
             q = q.limit(limit)
         pending = s.execute(q).all()

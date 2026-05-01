@@ -32,6 +32,7 @@ export default function ProjectsPage() {
     queryFn: () => api.suburbStats({ limit: 12 }),
   });
 
+
   function setKind(k: string) {
     const p = new URLSearchParams(params);
     if (k === "all") p.delete("kind");
@@ -176,42 +177,53 @@ export default function ProjectsPage() {
               />
             )}
             {apps.data && apps.data.items.length > 0 && (
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm border-collapse">
-                  <thead className="text-[11px] uppercase tracking-wide text-muted/80 sticky top-0 bg-panel">
-                    <tr className="text-center border-b border-border/40">
-                      <th className="px-3 py-2.5 font-medium border-x border-border/30">Kind</th>
-                      <th className="px-3 py-2.5 font-medium border-r border-border/30">Site cost ($m)</th>
-                      <th className="px-3 py-2.5 font-medium border-r border-border/30">Site m²</th>
-                      <th className="px-3 py-2.5 font-medium border-r border-border/30">Site sold</th>
-                      <th className="px-3 py-2.5 font-medium border-r border-border/30">Site</th>
-                      <th className="px-3 py-2.5 font-medium border-r border-border/30">Suburb</th>
-                      <th className="px-3 py-2.5 font-medium border-r border-border/30">Postcode</th>
-                      <th className="px-3 py-2.5 font-medium border-r border-border/30">Developer</th>
-                      <th className="px-3 py-2.5 font-medium border-r border-border/30">Δ Supply</th>
-                      <th className="px-3 py-2.5 font-medium border-r border-border/30">
-                        <div>Timeline</div>
-                        <div className="grid grid-cols-2 gap-2 text-[9px] text-muted/70 mt-1 normal-case tracking-normal">
-                          <span>prep</span>
-                          <span>project</span>
-                        </div>
-                      </th>
-                      <th className="px-3 py-2.5 font-medium border-r border-border/30">DA</th>
-                      <th className="px-3 py-2.5 font-medium border-r border-border/30">Status</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {apps.data.items.map((a) => (
-                      <ProjectRow key={`${a.councilSlug}|${a.applicationId}`} a={a} />
-                    ))}
-                  </tbody>
-                </table>
+              <>
+                {/* Desktop / wide-viewport: classic table. */}
+                <div className="hidden md:block overflow-x-auto">
+                  <table className="w-full text-sm border-collapse">
+                    <thead className="text-[11px] uppercase tracking-wide text-muted/80 sticky top-0 bg-panel">
+                      <tr className="text-center border-b border-border/40">
+                        <th className="px-3 py-2.5 font-medium border-x border-border/30">Kind</th>
+                        <th className="px-3 py-2.5 font-medium border-r border-border/30">Site cost ($m)</th>
+                        <th className="px-3 py-2.5 font-medium border-r border-border/30">Site m²</th>
+                        <th className="px-3 py-2.5 font-medium border-r border-border/30">Site sold</th>
+                        <th className="px-3 py-2.5 font-medium border-r border-border/30">Site</th>
+                        <th className="px-3 py-2.5 font-medium border-r border-border/30">Suburb</th>
+                        <th className="px-3 py-2.5 font-medium border-r border-border/30">Postcode</th>
+                        <th className="px-3 py-2.5 font-medium border-r border-border/30">Developer</th>
+                        <th className="px-3 py-2.5 font-medium border-r border-border/30">Δ Supply</th>
+                        <th className="px-3 py-2.5 font-medium border-r border-border/30">
+                          <div>Timeline</div>
+                          <div className="grid grid-cols-2 gap-2 text-[9px] text-muted/70 mt-1 normal-case tracking-normal">
+                            <span>prep</span>
+                            <span>project</span>
+                          </div>
+                        </th>
+                        <th className="px-3 py-2.5 font-medium border-r border-border/30">DA</th>
+                        <th className="px-3 py-2.5 font-medium border-r border-border/30">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {apps.data.items.map((a) => (
+                        <ProjectRow key={`${a.councilSlug}|${a.applicationId}`} a={a} />
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Narrow-viewport: stacked cards. Same data, no scroll. */}
+                <div className="md:hidden divide-y divide-border/30">
+                  {apps.data.items.map((a) => (
+                    <ProjectCard key={`${a.councilSlug}|${a.applicationId}`} a={a} />
+                  ))}
+                </div>
+
                 <div className="px-5 py-3 text-xs text-muted border-t border-border/40">
                   Showing {num(apps.data.items.length)} analysed project
                   {apps.data.items.length === 1 ? "" : "s"}.
                   {" "}Only DAs that have been LLM-summarised appear here.
                 </div>
-              </div>
+              </>
             )}
           </div>
         </section>
@@ -335,12 +347,20 @@ function ProjectRow({ a }: { a: Application }) {
         {a.postcode ?? "—"}
       </td>
 
-      {/* Developer — codename in hot pink */}
-      <td className={cx(cellBase, "max-w-[200px] text-center")}>
+      {/* Developer — codename in hot pink, project-count in bottom-right */}
+      <td className={cx(cellBase, "max-w-[200px] text-center relative")}>
         {insight?.applicantName ? (
           <ApplicantCell insight={insight} />
         ) : (
           <span className="text-muted text-xs">—</span>
+        )}
+        {insight?.developerProjectCount != null && insight.developerProjectCount > 1 && (
+          <span
+            className="absolute bottom-0.5 right-1 text-[10px] font-mono text-muted/80"
+            title={`${insight.developerProjectCount} total DAs from this developer in the dataset`}
+          >
+            ×{insight.developerProjectCount}
+          </span>
         )}
       </td>
 
@@ -370,6 +390,107 @@ function ProjectRow({ a }: { a: Application }) {
         </div>
       </td>
     </tr>
+  );
+}
+
+/** Mobile / narrow-viewport rendering. Same data as ProjectRow, stacked
+ *  vertically with section headers so everything fits on a phone screen
+ *  without horizontal scroll. Reuses the cell components for consistency.
+ */
+function ProjectCard({ a }: { a: Application }) {
+  const insight = a.insight;
+  const sale = a.saleStory;
+  const street = streetOnly(a.rawAddress);
+
+  return (
+    <Link
+      to={`/applications/${a.councilSlug}/${encodeURIComponent(a.applicationId)}`}
+      className="row-hover block p-4 space-y-3"
+    >
+      {/* Headline: kind badge + street, suburb on its own line. */}
+      <div className="flex items-start gap-3">
+        <KindBadge kind={a.kind} />
+        <div className="flex-1 min-w-0">
+          <div className="text-sm font-medium truncate">{street}</div>
+          <div className={cx("text-xs uppercase tracking-wide", suburbColor(a.suburb))}>
+            {a.suburb ?? "—"} {a.postcode ?? ""}
+          </div>
+        </div>
+        {/* DA + Status inline at the right edge. */}
+        <div className="flex items-center gap-2 shrink-0">
+          <DaStatusCell a={a} />
+          <ProjectStatusCell a={a} insight={insight} sale={sale} streetSuffix={street} />
+        </div>
+      </div>
+
+      {/* Site financial summary — three datapoints in a row. */}
+      <div className="grid grid-cols-3 gap-2 text-xs">
+        <div className="text-center">
+          <div className="text-muted text-[10px] uppercase tracking-wide">Site $</div>
+          <div className="font-mono num text-sm">
+            {sale?.prePrice
+              ? `$${(Number(sale.prePrice) / 1_000_000).toFixed(2)}m`
+              : <span className="text-muted">—</span>}
+          </div>
+        </div>
+        <div className="text-center">
+          <div className="text-muted text-[10px] uppercase tracking-wide">m²</div>
+          <div className="font-mono num text-sm">
+            {sale?.siteAreaM2 ? (
+              sale.siteAreaSource === "da_docs" ? (
+                <span title="Estimated from DA documents — uncertain" className="italic text-muted">
+                  {num(sale.siteAreaM2)}*
+                </span>
+              ) : (
+                num(sale.siteAreaM2)
+              )
+            ) : (
+              <span className="text-muted">—</span>
+            )}
+          </div>
+        </div>
+        <div className="text-center">
+          <div className="text-muted text-[10px] uppercase tracking-wide">Sold</div>
+          <div className="font-mono num text-sm">
+            {sale?.preDate ? monthYear(sale.preDate) : <span className="text-muted">—</span>}
+          </div>
+        </div>
+      </div>
+
+      {/* Δ Supply + Timeline, side by side. */}
+      <div className="grid grid-cols-2 gap-3 text-xs">
+        <div className="text-center">
+          <div className="text-muted text-[10px] uppercase tracking-wide mb-1">Δ Supply</div>
+          <DeltaSupplyCell insight={insight} sale={sale} />
+        </div>
+        <div className="text-center">
+          <div className="text-muted text-[10px] uppercase tracking-wide mb-1">
+            Timeline (prep · project)
+          </div>
+          <TimelineCell a={a} sale={sale} />
+        </div>
+      </div>
+
+      {/* Developer codename + total project count from the backend. */}
+      <div className="text-xs flex justify-between items-center">
+        <span>
+          <span className="text-muted">Developer: </span>
+          {insight?.applicantName ? (
+            <ApplicantCell insight={insight} />
+          ) : (
+            <span className="text-muted">—</span>
+          )}
+        </span>
+        {insight?.developerProjectCount != null && insight.developerProjectCount > 1 && (
+          <span
+            className="text-[10px] font-mono text-muted/80"
+            title={`${insight.developerProjectCount} total DAs from this developer in the dataset`}
+          >
+            ×{insight.developerProjectCount}
+          </span>
+        )}
+      </div>
+    </Link>
   );
 }
 
@@ -442,11 +563,17 @@ function codenameFor(seed: string | null | undefined): string {
   return `${adj1}-${adj2}-${noun}`;
 }
 
+/** Seed for codename hashing AND for grouping projects by developer.
+ *  ACN first (most stable), normalised applicant_name as fallback. */
+function applicantSeed(insight: DaInsight | undefined): string | null {
+  if (!insight) return null;
+  if (insight.applicantAcn) return insight.applicantAcn;
+  const n = (insight.applicantName ?? "").toLowerCase().replace(/\s+/g, " ").trim();
+  return n || null;
+}
+
 function ApplicantCell({ insight }: { insight: DaInsight }) {
-  // ACN is the most stable seed; fall back to normalised name when absent.
-  const seed =
-    insight.applicantAcn ||
-    (insight.applicantName ?? "").toLowerCase().replace(/\s+/g, " ").trim();
+  const seed = applicantSeed(insight) ?? "";
   const name = codenameFor(seed);
   const tooltip = [
     insight.applicantName,

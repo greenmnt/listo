@@ -199,6 +199,7 @@ class InforEpathwayScraper:
         date_to: date,
         sink: RequestSink,
         skip_application_ids: set[str] | None = None,
+        allowed_type_codes: set[str] | None = None,
     ) -> Iterator[DaListingRow]:
         """Walk every enquiry list configured for this council, submitting
         a Date range search (lodged_date BETWEEN date_from AND date_to)
@@ -209,12 +210,21 @@ class InforEpathwayScraper:
         DaListingRow without clicking into the detail page — the
         orchestrator's upsert is a near-noop, but keeping the yield
         means list_first_seen_at gets a heartbeat update.
+
+        allowed_type_codes: residential-focus filter. Listings whose
+        type-code prefix isn't in the set are still yielded (so
+        list_first_seen_at is stamped) but we skip the inline
+        detail+docs fetch. This is the per-row equivalent of the same
+        filter the orchestrator applies to the detail/docs phases.
         """
         # Stash on instance so session re-establishment can re-submit
         # with the same dates without us having to thread them through.
         self._date_from = date_from
         self._date_to = date_to
         self._skip_ids = skip_application_ids or set()
+        self._allowed_types = (
+            {t.upper() for t in allowed_type_codes} if allowed_type_codes else None
+        )
         for enquiry_label in self.config.enquiry_lists:
             yield from self._iter_one_list(enquiry_label, date_from, date_to, sink)
 
@@ -269,6 +279,23 @@ class InforEpathwayScraper:
                         "[%s] page %d row %d/%d: %s — already complete, skipping",
                         self.council_slug, page_index, row_index, page_total,
                         listing.application_id,
+                    )
+                    total_rows += 1
+                    yield listing
+                    continue
+
+                # Type-code filter — yield the listing so it lands in the
+                # DB with list_first_seen_at, but skip the heavy inline
+                # detail+docs fetch when the type is non-residential.
+                if (
+                    self._allowed_types is not None
+                    and listing.type_code
+                    and listing.type_code.upper() not in self._allowed_types
+                ):
+                    logger.info(
+                        "[%s] page %d row %d/%d: %s — type=%s not in allowlist, skipping detail/docs",
+                        self.council_slug, page_index, row_index, page_total,
+                        listing.application_id, listing.type_code,
                     )
                     total_rows += 1
                     yield listing

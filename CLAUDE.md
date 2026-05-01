@@ -44,6 +44,7 @@ Dropped in 0006: `dev_applications`, `da_documents`, `da_flags` (replaced by the
 - **`councils/techone_etrack.py`** — TechnologyOne eTrack vendor (Newcastle pre-Feb-2026). ASP.NET WebForms, similar in spirit to ePathway. **Selectors are best-guesses; will need tuning against a live page.**
 - **`councils/techone_t1cloud.py`** — TechnologyOne T1Cloud vendor (Newcastle post-Feb-2026). SaaS SPA; intercepts XHR JSON responses for authoritative data with a DOM-scraping fallback. **Selectors are best-guesses; will need tuning against a live page.**
 - **`rba.py`** — RBA F5 CSV ingest into `mortgage_rates`.
+- **`asic.py`** — ASIC Connect Online registry scraper (ACN ↔ company name). Drives the Oracle ADF search via `connect_over_cdp("http://localhost:9222")` against the user's running Chrome — fresh patchright instances trip invisible reCAPTCHA, the warmed Chrome session passes silently. Each detail fetch happens in its own tab to isolate ADF state and reCAPTCHA scoring. Persists into the existing `companies` table (matched by ACN) using the `asic_*` enrichment columns from migration 0018.
 
 ### CLI
 
@@ -54,8 +55,15 @@ listo council scrape <slug> --from YYYY-MM-DD --to YYYY-MM-DD
                                                           # full pipeline: list → detail → docs
                                                           # add --list-only / --detail-only / --docs-only for one phase
                                                           # add --detail-limit N / --docs-limit N to cap a run
+                                                          # --types defaults to MCU,COM,ROL,EDA,EXA,PDA,FDA (residential redev);
+                                                          #   listings still recorded for excluded types — only detail+docs skipped.
+                                                          #   pass --types all to fetch every category.
 listo council resume <slug>                               # picks up detail+docs over the existing date span in db
 listo enrich rates                                        # RBA F5 mortgage rates
+listo asic lookup <ACN>                                   # one ACN → ASIC View Details → upsert companies row
+listo asic search "<name>"                                # name search → walk all pages → fetch detail for every Australian Proprietary Company hit
+                                                          # add --types "Type1,Type2" / --types all to widen the filter
+listo asic status                                         # how many companies rows have ASIC enrichment, top localities
 ```
 
 ### Resume model

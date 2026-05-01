@@ -662,7 +662,53 @@ class Company(Base):
     display_name: Mapped[str] = mapped_column(String(255), nullable=False)
     norm_name: Mapped[str] = mapped_column(String(255), nullable=False)
     entity_type: Mapped[str] = mapped_column(String(20), nullable=False, default="unknown")
+    asic_status: Mapped[str | None] = mapped_column(String(20))
+    asic_company_type: Mapped[str | None] = mapped_column(String(120))
+    asic_locality: Mapped[str | None] = mapped_column(String(120))
+    asic_regulator: Mapped[str | None] = mapped_column(String(80))
+    asic_registration_date: Mapped[date | None] = mapped_column(Date)
+    asic_next_review_date: Mapped[date | None] = mapped_column(Date)
+    asic_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+
+
+class ApplicationEntity(Base):
+    """Many-to-many link between a DA and a `companies` row, with role + provenance.
+
+    Lets a single project carry multiple owners (e.g. spouses on the
+    same title), distinguish the applicant from their c/- agent, and
+    record which document each entity claim came from. Stage-2 project
+    synthesis reads all rows for an application and decides which to
+    promote into the denormalised pointers on `da_summaries`.
+    """
+    __tablename__ = "application_entities"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    application_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("council_applications.id", ondelete="CASCADE"), nullable=False
+    )
+    company_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("companies.id", ondelete="CASCADE"), nullable=False
+    )
+    role: Mapped[str] = mapped_column(String(30), nullable=False)
+    is_primary: Mapped[bool] = mapped_column(default=False)
+    source_doc_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("council_application_documents.id", ondelete="SET NULL")
+    )
+    source_field: Mapped[str | None] = mapped_column(String(80))
+    extractor: Mapped[str] = mapped_column(String(40), nullable=False)
+    confidence: Mapped[str | None] = mapped_column(String(10))
+    extracted_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "application_id", "company_id", "role", "source_doc_id", "extractor",
+            name="uq_ae_dedup",
+        ),
+        Index("ix_ae_app", "application_id", "role"),
+        Index("ix_ae_co", "company_id", "role"),
+        Index("ix_ae_doc", "source_doc_id"),
+    )
 
 
 class PromptTemplate(Base):

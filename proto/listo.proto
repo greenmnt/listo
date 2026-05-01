@@ -133,6 +133,11 @@ message DaInsight {
   int32 n_amendments = 14;
   optional int64 total_bytes = 15;
   optional int32 days_lodge_to_decide = 16;
+  // Total DAs from this developer across the whole dataset (joined on
+  // applicant_company_id, which dedupes by ACN > ABN > norm_name). NOT
+  // filtered by the request's kind / suburb / search params — surfaces
+  // the developer's full project history regardless of the current view.
+  optional int32 developer_project_count = 17;
 }
 
 // Aggregated sales-history view over the same lot. Pre = the developer's

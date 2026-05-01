@@ -158,7 +158,12 @@ class TechOneT1CloudScraper:
         date_to: date,
         sink: RequestSink,
         skip_application_ids: set[str] | None = None,
+        allowed_type_codes: set[str] | None = None,
     ) -> Iterator[DaListingRow]:
+        # SCAFFOLD: type-code filter not yet wired through this vendor;
+        # accepted to satisfy the protocol so the orchestrator can pass
+        # it without breaking. Implement when this scraper goes live.
+        del allowed_type_codes
         page = self._page
         assert page is not None
 

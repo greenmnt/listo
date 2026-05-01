@@ -30,6 +30,14 @@ pub async fn list(
                 ds.applicant_acn       AS llm_applicant_acn,
                 ds.applicant_entity_type AS llm_applicant_entity_type,
                 ds.applicant_agent_name AS llm_applicant_agent_name,
+                -- Total DAs across this developer's history, regardless of
+                -- the user's current kind / suburb / search filters. Keyed
+                -- on applicant_company_id which is deduped by ACN > ABN >
+                -- norm_name in `_upsert_company`, so the same dev across
+                -- house / duplex / etc. counts as one.
+                (SELECT COUNT(*) FROM da_summaries ds_all
+                  WHERE ds_all.applicant_company_id IS NOT NULL
+                    AND ds_all.applicant_company_id = ds.applicant_company_id) AS llm_developer_project_count,
                 ds.builder_name        AS llm_builder_name,
                 ds.architect_name      AS llm_architect_name,
                 ds.dwelling_count      AS llm_dwelling_count,
@@ -396,6 +404,12 @@ pub async fn list(
         binds.push(pattern.clone());
         binds.push(pattern);
     }
+    // Drop rows where pre_price is NULL — the recency cap on pre_price
+    // means these have no usable parent sale on file (>10y old or none
+    // at all), so the redev margin can't be computed and the row isn't
+    // actionable for the dataset's core purpose. HAVING references the
+    // SELECT alias since pre_price is a derived column.
+    sql.push_str(" HAVING pre_price IS NOT NULL");
     sql.push_str(" ORDER BY ca.lodged_date DESC, ca.id DESC LIMIT ? OFFSET ?");
 
     let mut query = sqlx::query(&sql);
@@ -627,6 +641,7 @@ fn build_insight(r: &MySqlRow) -> Option<pb::DaInsight> {
     let n_docs_u: Option<u32> = r.try_get("llm_n_docs").ok();
     let n_info_u: Option<u32> = r.try_get("llm_n_info_requests").ok();
     let n_amend_u: Option<u32> = r.try_get("llm_n_amendments").ok();
+    let dev_count: Option<i64> = r.try_get("llm_developer_project_count").ok();
 
     Some(pb::DaInsight {
         applicant_name: r.try_get("llm_applicant_name").ok(),
@@ -645,6 +660,7 @@ fn build_insight(r: &MySqlRow) -> Option<pb::DaInsight> {
         n_amendments: n_amend_u.unwrap_or(0) as i32,
         total_bytes,
         days_lodge_to_decide: r.try_get("llm_days_lodge_to_decide").ok(),
+        developer_project_count: dev_count.map(|v| v as i32),
     })
 }
 

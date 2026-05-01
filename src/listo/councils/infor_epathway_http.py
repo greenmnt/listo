@@ -260,9 +260,13 @@ class InforEpathwayHttpScraper:
         date_to: date,
         sink: RequestSink,
         skip_application_ids: set[str] | None = None,
+        allowed_type_codes: set[str] | None = None,
     ) -> Iterator[DaListingRow]:
         """Walk every enquiry list configured for this council."""
         self._skip_ids = skip_application_ids or set()
+        self._allowed_types = (
+            {t.upper() for t in allowed_type_codes} if allowed_type_codes else None
+        )
         for enquiry_label in self.config.enquiry_lists:
             yield from self._iter_one_list(enquiry_label, date_from, date_to, sink)
 
@@ -302,6 +306,21 @@ class InforEpathwayHttpScraper:
                         "[%s] (http) page %d row %d/%d: %s — already complete, skipping",
                         self.council_slug, page_index, i, len(rows),
                         listing.application_id,
+                    )
+                    total_rows += 1
+                    yield listing
+                    continue
+                # Type-code filter — yield bare listing without inline
+                # detail/docs fetch when not in the residential allowlist.
+                if (
+                    self._allowed_types is not None
+                    and listing.type_code
+                    and listing.type_code.upper() not in self._allowed_types
+                ):
+                    logger.info(
+                        "[%s] (http) page %d row %d/%d: %s — type=%s not in allowlist, skipping",
+                        self.council_slug, page_index, i, len(rows),
+                        listing.application_id, listing.type_code,
                     )
                     total_rows += 1
                     yield listing

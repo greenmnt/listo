@@ -18,8 +18,10 @@ from listo.models import (
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 council_app = typer.Typer(no_args_is_help=True, help="Council DA scraping")
 enrich_app = typer.Typer(no_args_is_help=True)
+asic_app = typer.Typer(no_args_is_help=True, help="ASIC Connect Online lookups")
 app.add_typer(council_app, name="council")
 app.add_typer(enrich_app, name="enrich")
+app.add_typer(asic_app, name="asic")
 
 from listo.property_history.cli import property_app  # noqa: E402
 
@@ -30,6 +32,27 @@ from listo.da_summaries.cli import da_app  # noqa: E402
 app.add_typer(da_app, name="da")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+
+# Default residential-redev allowlist for council DA scraping. Derived
+# empirically from the on-disk filter the team applied during cleanup —
+# OPW (Operational Works), MIN (Minor Change), OPV, OPT, OTH, TRO are
+# civil/admin work and were ~91% deleted; the codes below were ~95% kept.
+RESIDENTIAL_TYPE_CODES = "MCU,COM,ROL,EDA,EXA,PDA,FDA"
+
+
+def _parse_types(types: str | None) -> set[str] | None:
+    """Translate the --types CLI option into the set the orchestrator wants.
+
+    'all' / '*' / '' → None (no filter, fetch everything).
+    Anything else → uppercased {'MCU', 'COM', ...}.
+    """
+    if not types:
+        return None
+    t = types.strip()
+    if t.lower() in ("all", "*"):
+        return None
+    return {x.strip().upper() for x in t.split(",") if x.strip()}
 
 
 # ---------------- top-level ----------------
@@ -117,12 +140,23 @@ def council_scrape(
     docs_only: bool = typer.Option(False, "--docs-only", help="phase 3 only: download documents for apps with details"),
     detail_limit: int = typer.Option(0, "--detail-limit", help="cap detail fetches this run (0 = no cap)"),
     docs_limit: int = typer.Option(0, "--docs-limit", help="cap doc-download apps this run (0 = no cap)"),
+    types: str = typer.Option(
+        RESIDENTIAL_TYPE_CODES, "--types",
+        help="comma-separated type-code allowlist for detail+docs fetch. "
+             "Pass 'all' to disable the filter and fetch every category.",
+    ),
 ) -> None:
     """Scrape a council across the given lodgement-date window.
 
     Default behaviour runs all three phases (list → detail → docs).
     Use --list-only / --detail-only / --docs-only to run a single
     phase. Re-running is safe — per-stage timestamps drive resume.
+
+    The default --types allowlist captures residential-redev DA codes
+    (MCU/COM/ROL/EDA/EXA/PDA/FDA) and skips civil/admin work like
+    OPW/MIN/OPV/OPT/OTH so we don't waste bandwidth on categories we
+    won't use downstream. Listing rows are still recorded for
+    excluded types — only detail+docs get skipped.
     """
     from listo.councils.orchestrator import run_council
     from listo.councils.registry import get_council
@@ -130,6 +164,7 @@ def council_scrape(
     council = get_council(slug)
     df = date.fromisoformat(date_from)
     dt_to = date.fromisoformat(date_to)
+    allowed = _parse_types(types)
 
     do_list = True
     do_detail = True
@@ -143,7 +178,8 @@ def council_scrape(
 
     typer.echo(
         f"scraping {council.name} ({slug}) {df} → {dt_to}  "
-        f"phases: list={do_list} detail={do_detail} docs={do_docs}"
+        f"phases: list={do_list} detail={do_detail} docs={do_docs}  "
+        f"types: {sorted(allowed) if allowed else 'ALL'}"
     )
     stats = run_council(
         council,
@@ -154,6 +190,7 @@ def council_scrape(
         do_docs=do_docs,
         detail_limit=detail_limit or None,
         docs_limit=docs_limit or None,
+        allowed_type_codes=allowed,
     )
     typer.echo(
         f"done — listed: {stats['list']}, detailed: {stats['detail']}, "
@@ -261,6 +298,10 @@ def council_scrape_monthly(
     worker_index: int = typer.Option(0, "--worker-index", help="0-based partition index for this worker"),
     worker_count: int = typer.Option(1, "--worker-count", help="total parallel workers splitting the months"),
     force: bool = typer.Option(False, "--force", help="re-scrape months already marked completed"),
+    types: str = typer.Option(
+        RESIDENTIAL_TYPE_CODES, "--types",
+        help="comma-separated type-code allowlist; pass 'all' to fetch every category.",
+    ),
 ) -> None:
     """Iterate the date range one month at a time, skipping months already
     marked `completed` in council_scrape_windows. Each month is its own
@@ -279,6 +320,7 @@ def council_scrape_monthly(
     df = date.fromisoformat(date_from)
     dt_to = date.fromisoformat(date_to)
     months = _iter_months(df, dt_to)
+    allowed = _parse_types(types)
 
     do_list = not (detail_only or docs_only)
     do_detail = not (list_only or docs_only)
@@ -287,7 +329,8 @@ def council_scrape_monthly(
     typer.echo(
         f"scraping {council.name} ({slug}) {len(months)} month(s) "
         f"worker {worker_index}/{worker_count}  "
-        f"phases: list={do_list} detail={do_detail} docs={do_docs}"
+        f"phases: list={do_list} detail={do_detail} docs={do_docs}  "
+        f"types: {sorted(allowed) if allowed else 'ALL'}"
     )
 
     n_done = 0
@@ -313,6 +356,7 @@ def council_scrape_monthly(
                 do_list=do_list, do_detail=do_detail, do_docs=do_docs,
                 detail_limit=detail_limit or None,
                 docs_limit=docs_limit or None,
+                allowed_type_codes=allowed,
             )
             typer.secho(
                 f"  [{first.strftime('%Y-%m')}] ✓ done — list:{stats['list']} "
@@ -481,6 +525,101 @@ def enrich_rates() -> None:
             "FROM mortgage_rates"
         )).first()
         typer.echo(f"  date range: {rng.earliest} → {rng.latest}, total rows: {rng.total}")
+
+
+# ---------------- asic ----------------
+
+
+@asic_app.command("lookup")
+def asic_lookup(acn: str) -> None:
+    """Look up a single ACN on ASIC Connect Online and persist the result."""
+    from listo import asic as asic_mod
+
+    detail = asic_mod.lookup_acn(acn)
+    if detail is None:
+        typer.echo(f"ACN {acn}: not found")
+        raise typer.Exit(code=1)
+    stats = asic_mod.persist_details([detail])
+    typer.echo(
+        f"{detail.name}  ACN {detail.acn}  ABN {detail.abn or '-'}  "
+        f"{detail.status}  {detail.locality or '-'}  "
+        f"(reg {detail.registration_date})"
+    )
+    typer.echo(f"  persisted: {stats}")
+
+
+@asic_app.command("search")
+def asic_search(
+    name: str,
+    types: str = typer.Option(
+        "Australian Proprietary Company",
+        help="Comma-separated Type values to fetch detail for. "
+             "Pass 'all' to fetch every row that has an ACN.",
+    ),
+    sleep: float = typer.Option(3.0, help="Seconds between detail fetches."),
+) -> None:
+    """Search ASIC by name; fetch + persist detail for matching rows.
+
+    Defaults to Australian Proprietary Company (Pty Ltd) only — the
+    case the listo redev pipeline cares about.
+    """
+    from listo import asic as asic_mod
+
+    if types.strip().lower() == "all":
+        types_to_fetch = tuple({"Australian Proprietary Company",
+                                "Australian Public Company",
+                                "Registered Australian Body",
+                                "Foreign Company"})
+    else:
+        types_to_fetch = tuple(t.strip() for t in types.split(",") if t.strip())
+
+    rows, details = asic_mod.search_by_name(
+        name, types_to_fetch=types_to_fetch, sleep_between=sleep,
+    )
+    typer.echo(f"name search {name!r}: {len(rows)} total rows")
+    for r in rows:
+        marker = "*" if r.acn and r.type_text in types_to_fetch else " "
+        typer.echo(
+            f"  {marker} {r.acn or '-':<10} {r.name[:40]:<40} "
+            f"{r.type_text[:32]:<32} {r.status}"
+        )
+    if not details:
+        typer.echo("no detail records fetched")
+        return
+    stats = asic_mod.persist_details(details)
+    typer.echo(f"\npersisted {len(details)} detail records: {stats}")
+
+
+@asic_app.command("status")
+def asic_status() -> None:
+    """Counts of `companies` rows, broken down by ASIC enrichment state."""
+    with session_scope() as s:
+        total = s.execute(text("SELECT COUNT(*) FROM companies")).scalar() or 0
+        with_asic = s.execute(
+            text("SELECT COUNT(*) FROM companies WHERE asic_fetched_at IS NOT NULL")
+        ).scalar() or 0
+        registered = s.execute(text(
+            "SELECT COUNT(*) FROM companies WHERE asic_status = 'Registered'"
+        )).scalar() or 0
+        latest = s.execute(text(
+            "SELECT MAX(asic_fetched_at) FROM companies"
+        )).scalar()
+        by_locality = s.execute(text("""
+            SELECT asic_locality, COUNT(*) AS n
+              FROM companies
+             WHERE asic_locality IS NOT NULL
+             GROUP BY asic_locality
+             ORDER BY n DESC
+             LIMIT 10
+        """)).fetchall()
+    typer.echo(f"companies total:        {total}")
+    typer.echo(f"  with ASIC enrichment: {with_asic}")
+    typer.echo(f"  Registered status:    {registered}")
+    typer.echo(f"  last fetched:         {latest}")
+    if by_locality:
+        typer.echo("\ntop registered-office localities:")
+        for row in by_locality:
+            typer.echo(f"  {row.n:>4}  {row.asic_locality}")
 
 
 def main() -> None:

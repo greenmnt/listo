@@ -175,6 +175,7 @@ class CouncilScraper(Protocol):
         date_to: date,
         sink: RequestSink,
         skip_application_ids: set[str] | None = None,
+        allowed_type_codes: set[str] | None = None,
     ) -> Iterator[DaListingRow]:
         """Walk the search results for the given lodgement-date range.
 
@@ -187,6 +188,14 @@ class CouncilScraper(Protocol):
         previous run. Scrapers should yield a lightweight DaListingRow
         for matches without re-doing detail/docs work, so resume after
         a crash or session-expiry is fast.
+
+        allowed_type_codes: when set, scrapers must still yield every
+        listing row in the date window so list-phase coverage stays
+        complete, but should skip the detail+docs inline fetch for any
+        application whose type code falls outside the set. The
+        orchestrator's detail/docs phases enforce the same filter, so a
+        non-residential row gets persisted as a bare listing without
+        ever costing the heavy fetch work.
         """
         ...
 
