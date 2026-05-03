@@ -157,19 +157,12 @@ def fetch_html_via_google_click(
                 timeout=timeout_ms,
             )
 
-        _human_search(google_tab, url)
-
-        target_page = None
-        http_status = 0
-        # Strategy 1: click the canonical result-heading anchor for
-        # the target URL. Try the most specific selectors first so we
-        # don't accidentally click a "Read more" excerpt link, an
-        # about-this-result anchor, or a sidebar duplicate.
-        #
         # Google result heading: <a jsname="UWckNb" class="zReHs"
         #                          href="...realestate.com.au/...">
         #                          <h3>...</h3>
         #                        </a>
+        # Most specific first — avoid the "Read more" excerpt link,
+        # the about-this-result anchor, and sidebar duplicates.
         candidate_selectors = (
             f'a.zReHs[href="{url}"]',
             f'a[jsname="UWckNb"][href="{url}"]',
@@ -179,6 +172,27 @@ def fetch_html_via_google_click(
             f'a:has(h3)[href*="{url}"]',
             f'a[href*="{url}"]',
         )
+
+        # If the URL anchor is ALREADY on the current Google tab — it
+        # almost always is, because the orchestrator's discovery phase
+        # just searched for the address and surfaced this URL — click
+        # it directly. Don't waste a query (and a captcha-risk roll)
+        # re-searching for the URL itself, because Google rarely
+        # indexes property URLs as their own results.
+        already_present = False
+        for sel in candidate_selectors:
+            if google_tab.locator(sel).count():
+                already_present = True
+                break
+        if not already_present:
+            logger.info(
+                "click-through: URL not on current Google tab — "
+                "running a fresh search for it (%s)", url,
+            )
+            _human_search(google_tab, url)
+
+        target_page = None
+        http_status = 0
         try:
             chosen_selector: str | None = None
             link = None
