@@ -21,7 +21,7 @@ from typing import Any
 from listo.address import normalize_address
 from listo.db import session_scope
 from listo.models import RealestateProperty, RealestateSale
-from listo.property_history.cdp import fetch_html
+from listo.property_history.cdp import fetch_html, fetch_html_via_google_click
 from listo.property_history.storage import store_raw_page
 
 
@@ -400,10 +400,15 @@ class FetchReaPdpResult:
 
 
 def fetch_and_persist(url: str) -> FetchReaPdpResult:
-    fetched = fetch_html(
+    # REA's Kasada wall scores the Referer header — direct page.goto
+    # arrives with an empty Referer (bot-shaped). Click-through from a
+    # Google search sets the canonical google.com Referer, plus a
+    # randomised dwell on the loaded tab makes the visit read human.
+    fetched = fetch_html_via_google_click(
         url,
         wait_for_function="() => !!window.ArgonautExchange",
         wait_until="domcontentloaded",
+        settle_seconds=4.0,
     )
     raw_page_id = store_raw_page(
         source=SOURCE,
