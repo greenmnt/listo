@@ -17,6 +17,11 @@
 
 set -euo pipefail
 
+# Silence Playwright's Node `url.parse()` DEP0169 deprecation spam.
+# Harmless — upstream Playwright issue. Set before launching anything
+# that spawns Node (Playwright's driver process).
+export NODE_NO_WARNINGS=1
+
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # Persistent profile (so Kasada cookies survive reboots — /tmp is tmpfs).
 # Override with LISTO_CHROME_PROFILE=/some/other/dir if needed.

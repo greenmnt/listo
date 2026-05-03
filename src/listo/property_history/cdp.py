@@ -13,11 +13,17 @@ This module exposes:
 from __future__ import annotations
 
 import logging
+import os
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 
-from playwright.sync_api import sync_playwright
+# Silence Playwright's internal Node `url.parse()` deprecation banner
+# (DEP0169). Has to be set BEFORE `sync_playwright` spawns its Node
+# driver subprocess. Harmless — it's an upstream-Playwright issue.
+os.environ.setdefault("NODE_NO_WARNINGS", "1")
+
+from playwright.sync_api import sync_playwright  # noqa: E402
 
 
 CDP_URL = "http://localhost:9222"
