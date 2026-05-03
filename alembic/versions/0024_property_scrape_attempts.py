@@ -37,8 +37,12 @@ def upgrade() -> None:
         sa.Column("http_status", sa.SmallInteger(), nullable=True),
         sa.Column("result", sa.String(20), nullable=False),
         sa.Column("error_message", sa.String(500), nullable=True),
-        sa.Column("attempted_at", sa.DateTime(fsp=3), nullable=False,
-                  server_default=sa.func.now(3)),
+        sa.Column(
+            "attempted_at",
+            sa.dialects.mysql.DATETIME(fsp=3),
+            nullable=False,
+            server_default=sa.text("CURRENT_TIMESTAMP(3)"),
+        ),
         sa.UniqueConstraint(
             "source", "display_address",
             name="uq_property_scrape_attempts_source_addr",
