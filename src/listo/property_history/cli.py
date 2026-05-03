@@ -390,12 +390,27 @@ def scrape_batch(
 
         # Kasada circuit-breaker — see comment above the loop. We define
         # "burnt" as: discovery surfaced REA URLs to fetch, but zero PDPs
-        # got parsed AND every error mentions Kasada / propertyProfile.
+        # got parsed AND every error mentions a Kasada-shaped failure.
+        # Kasada hits surface in several shapes depending on whether the
+        # interstitial body parsed (propertyProfile branch) vs Chrome
+        # rejecting the navigation outright (HTTP error branch). Match
+        # any of them.
         rea_urls_attempted = (
             len(res.discovery.rea_pdp_urls) + len(res.discovery.rea_sold_urls)
         )
+        _KASADA_SIGNAL_TOKENS = (
+            "kasada",
+            "propertyProfile",
+            "CdpUnavailableError",
+            "ERR_HTTP_RESPONSE_CODE_FAILURE",
+            "ERR_HTTP_PROTOCOL_ERROR",
+            "ERR_FAILED",
+        )
         rea_kasada_signals = any(
-            ("kasada" in e.lower() or "propertyProfile" in e or "CdpUnavailableError" in e)
+            (
+                ("realestate.com.au" in e or e.startswith("rea_"))
+                and any(tok.lower() in e.lower() for tok in _KASADA_SIGNAL_TOKENS)
+            )
             for e in res.counters.errors
         )
         burnt_now = (
