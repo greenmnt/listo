@@ -362,6 +362,13 @@ def scrape_batch(
     # the user can re-seed the profile before burning more candidates.
     KASADA_BREAKER_N = 3
     rea_burnt_streak = 0
+    # Domain 404 panic. A 404 from Domain on a slug we built ourselves
+    # almost always means the slug builder mis-canonicalised a street
+    # type (e.g. 'Boulevarde' vs 'boulevard', 'wy' vs 'way'). Each
+    # such miss silently drops a property. Abort fast so the slug
+    # builder can be fixed before more candidates are wasted.
+    DOMAIN_404_BREAKER_N = 3
+    domain_404_streak = 0
     for i, t in enumerate(targets, 1):
         typer.echo(f"\n[{i}/{len(targets)}] {t.application_id} → {t.search_address}")
         try:
@@ -411,6 +418,27 @@ def scrape_batch(
                 "candidates with partial coverage."
             )
             raise typer.Exit(code=2)
+
+        # Domain 404 panic — see comment near the streak counters.
+        domain_404_now = any(
+            "domain_pdp parent" in e and "HTTP 404" in e
+            for e in res.counters.errors
+        )
+        domain_404_streak = (domain_404_streak + 1) if domain_404_now else 0
+        if domain_404_streak >= DOMAIN_404_BREAKER_N:
+            typer.secho(
+                f"\nABORTING: {DOMAIN_404_BREAKER_N} consecutive DAs returned a "
+                "Domain 404 on the slug we built — slug builder is likely "
+                "mis-canonicalising a street type.",
+                fg=typer.colors.RED, bold=True,
+            )
+            typer.echo(
+                f"Last failing address: {t.search_address!r}. "
+                "Inspect the slug Domain expects (e.g. open the Domain "
+                "search UI), then add the variant to listo.address._SUFFIX_MAP "
+                "or fix canonical_long_form."
+            )
+            raise typer.Exit(code=3)
 
     typer.echo(f"\nbatch done: {successes} ok, {failures} failed")
 

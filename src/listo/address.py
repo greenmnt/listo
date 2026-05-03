@@ -54,16 +54,28 @@ def long_form(street_type: str) -> str:
 
 
 def _build_long_form() -> None:
-    """Populate _LONG_FORM from _SUFFIX_MAP. First-seen long form
-    wins, so the canonical spelling listed first in `_SUFFIX_MAP`
-    becomes the URL form. (Picking the *longest* would resolve 'bvd'
-    to 'boulevarde' — Domain's slug uses 'boulevard'.)
+    """Populate _LONG_FORM[short] = canonical long form for each
+    distinct short code in `_SUFFIX_MAP`.
+
+    Two cases:
+      - the short code has a longer canonical spelling (e.g. 'pde' →
+        'parade', 'bvd' → 'boulevard'). Pick the FIRST key longer
+        than the short — preserves canonical spelling order in
+        `_SUFFIX_MAP` (so 'boulevard' beats the AU variant
+        'boulevarde').
+      - the short code IS its own long form (e.g. 'way', 'rise',
+        'loop'). When no longer-than-short key is found,
+        `_LONG_FORM[short] = short`.
     """
-    for long, short in _SUFFIX_MAP.items():
-        if long == short:
-            continue  # 'pde' → 'pde'; not a long form
-        if short not in _LONG_FORM:
-            _LONG_FORM[short] = long
+    by_short: dict[str, list[str]] = {}
+    for k, v in _SUFFIX_MAP.items():
+        by_short.setdefault(v, []).append(k)
+    for short, keys in by_short.items():
+        canonical = next(
+            (k for k in keys if len(k) > len(short)),
+            short,  # fall through: short IS the long form
+        )
+        _LONG_FORM[short] = canonical
 
 
 def canonical_long_form(street_type: str) -> str:
