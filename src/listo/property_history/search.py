@@ -506,38 +506,73 @@ def discover_for_address(
     search_address: str,
     *,
     suburb_hint: str | None = None,
+    state: str | None = None,
+    postcode: str | None = None,
 ) -> DiscoveryResult:
     """Run Google searches and return all classified URLs for an address.
 
-    Sample call:
-        discover_for_address('124 Sunshine Parade Miami')
+    Two-phase strategy:
 
-    Issues two queries (REA + Domain) — Google's `site:` filter is more
-    accurate when scoped, and the dedup happens in `discovered_urls`.
+    1. **Generic query first.** `<street> <suburb> <state> <postcode>`
+       with no `site:` filter and no quotes. Google's first page
+       almost always carries the canonical REA + Domain hits for a
+       residential address. One query covers both sites — saves
+       captcha pressure.
+    2. **Site-specific fallback** for whichever side(s) didn't appear
+       on page one. `site:realestate.com.au "<address>"` style only
+       runs if REA wasn't surfaced (and analogously for Domain).
     """
-    # The quoted phrase is the strict match. Suburb hint is added unquoted
-    # only if it's not already present in `search_address` — otherwise
-    # Google sees the suburb twice and quality drops.
-    suffix = f" {suburb_hint}" if suburb_hint and suburb_hint.lower() not in search_address.lower() else ""
-    queries = [
-        f'site:realestate.com.au "{search_address}"{suffix}',
-        f'site:domain.com.au "{search_address}"{suffix}',
-    ]
-
     rea_pdp: set[str] = set()
     rea_sold: set[str] = set()
     domain_pdp: set[str] = set()
     domain_listing: set[str] = set()
+    queries: list[str] = []
 
-    for q in queries:
-        res = google_search(q)
-        cache_urls(search_address=search_address, query=q, urls=res.urls)
+    def _consume(res: SearchResult) -> None:
         for url in res.urls:
             kind = classify_url(url)
             if kind == "rea_pdp": rea_pdp.add(url)
             elif kind == "rea_sold": rea_sold.add(url)
             elif kind == "domain_pdp": domain_pdp.add(url)
             elif kind == "domain_listing": domain_listing.add(url)
+
+    # Phase 1 — generic.
+    generic_parts = [search_address]
+    if suburb_hint and suburb_hint.lower() not in search_address.lower():
+        generic_parts.append(suburb_hint)
+    if state:
+        generic_parts.append(state)
+    if postcode:
+        generic_parts.append(postcode)
+    generic_query = " ".join(generic_parts)
+    queries.append(generic_query)
+    res = google_search(generic_query)
+    cache_urls(search_address=search_address, query=generic_query, urls=res.urls)
+    _consume(res)
+
+    has_rea = bool(rea_pdp or rea_sold)
+    has_domain = bool(domain_pdp or domain_listing)
+
+    # Phase 2 — fall back per missing site.
+    suffix = (
+        f" {suburb_hint}"
+        if suburb_hint and suburb_hint.lower() not in search_address.lower()
+        else ""
+    )
+    fallback_queries: list[str] = []
+    if not has_rea:
+        fallback_queries.append(
+            f'site:realestate.com.au "{search_address}"{suffix}'
+        )
+    if not has_domain:
+        fallback_queries.append(
+            f'site:domain.com.au "{search_address}"{suffix}'
+        )
+    for q in fallback_queries:
+        queries.append(q)
+        res = google_search(q)
+        cache_urls(search_address=search_address, query=q, urls=res.urls)
+        _consume(res)
 
     return DiscoveryResult(
         search_address=search_address,

@@ -47,30 +47,40 @@ class PropertyHistoryRun:
     counters: RunCounters
 
 
-def _split_address(address: str) -> tuple[str, str]:
-    """Return ('124 Sunshine Parade', 'Miami') for a freeform address.
+def _split_address(address: str) -> tuple[str, str, str, str]:
+    """Return (street, suburb, state, postcode) for a freeform address.
 
-    The street is the *quoted phrase* we put in the Google search; the
-    suburb is an unquoted hint we add after. We expand any street-type
-    abbreviation to the long form because Google indexes Domain's slug
-    (long form) AND REA's slug (short form) cross-referenced — but
-    'Parade' typically returns more matches than 'Pde'.
+    The street is the quoted phrase we use when we have to fall back
+    to a site:-scoped search. State + postcode get added to the
+    initial generic Google query so the address is unambiguous on
+    the first page of results.
+
+    We expand any street-type abbreviation to the long form because
+    Google indexes Domain's slug (long form) AND REA's slug (short
+    form) cross-referenced — 'Parade' typically returns more matches
+    than 'Pde'.
     """
-    from listo.address import long_form
+    from listo.address import canonical_long_form
 
     parts = [p.strip() for p in address.split(",") if p.strip()]
     if len(parts) < 2:
-        return address.strip(), ""
+        return address.strip(), "", "", ""
     street = parts[0]
     tail = " ".join(parts[1:])
     m = re.search(r"(.+?)\s+([A-Z]{2,3})\s+(\d{4})$", tail)
-    suburb = m.group(1).strip() if m else tail.strip()
+    if m:
+        suburb = m.group(1).strip()
+        state = m.group(2).strip()
+        postcode = m.group(3).strip()
+    else:
+        suburb = tail.strip()
+        state = ""
+        postcode = ""
 
-    # Expand the street-type token to the long form for the search query.
     tokens = street.split()
     if tokens:
-        tokens[-1] = long_form(tokens[-1])
-    return " ".join(tokens), suburb
+        tokens[-1] = canonical_long_form(tokens[-1])
+    return " ".join(tokens), suburb, state, postcode
 
 
 def run(address: str, *, fetch_listings: bool = True, throttle: float = 2.0) -> PropertyHistoryRun:
@@ -94,9 +104,14 @@ def run(address: str, *, fetch_listings: bool = True, throttle: float = 2.0) -> 
         counters.errors.append(f"domain_pdp parent: {exc!r}")
 
     # -------- 2. Google discovery --------
-    search_address, suburb_hint = _split_address(address)
+    search_address, suburb_hint, state, postcode = _split_address(address)
     logger.info("=== Google discovery: %s ===", search_address)
-    discovery = search_mod.discover_for_address(search_address, suburb_hint=suburb_hint or None)
+    discovery = search_mod.discover_for_address(
+        search_address,
+        suburb_hint=suburb_hint or None,
+        state=state or None,
+        postcode=postcode or None,
+    )
     logger.info(
         "  rea_pdps=%d  rea_sold=%d  domain_pdps=%d  domain_listings=%d",
         len(discovery.rea_pdp_urls),
