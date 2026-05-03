@@ -199,6 +199,98 @@ class SearchResult:
     page_html_size: int
 
 
+def _is_google_captcha(html: str) -> bool:
+    """Detect Google's 'unusual traffic' CAPTCHA / sorry page. Multiple
+    independent markers — fire on any one to be robust against minor
+    template changes."""
+    if not html:
+        return False
+    for marker in (
+        "Our systems have detected unusual traffic",
+        'id="captcha-form"',
+        'class="g-recaptcha"',
+        "recaptcha/enterprise.js",
+    ):
+        if marker in html:
+            return True
+    return False
+
+
+def _wait_for_captcha_solve(query: str) -> None:
+    """Block on STDIN until the user solves the CAPTCHA in the live
+    Chrome on :9222. They visit `https://www.google.com/search?q=...`
+    in any tab, click through the reCAPTCHA, and press Enter here.
+
+    Falls back to a sleep when STDIN isn't a TTY (e.g. piped runs);
+    the next search after the wait will retry."""
+    import sys
+    msg = (
+        "\n"
+        "================================================================\n"
+        "  GOOGLE CAPTCHA detected for query:\n"
+        f"    {query!r}\n"
+        "  Open the listo Chrome (the one on :9222), solve the captcha,\n"
+        "  then press Enter here to continue.\n"
+        "================================================================\n"
+    )
+    logger.warning("google captcha hit; waiting for user to solve")
+    print(msg, flush=True)
+    if sys.stdin.isatty():
+        try:
+            input("press Enter after solving captcha ... ")
+        except (EOFError, KeyboardInterrupt):
+            raise
+    else:
+        # Headless run: sleep a long-enough beat so the rate-limit
+        # token bucket can refill. Caller will still retry.
+        logger.warning("STDIN not a TTY — sleeping 120s instead of waiting for user")
+        time.sleep(120)
+
+
+_CAPTCHA_RETRY_LIMIT = 3
+
+
+def _do_google_search(
+    query: str,
+    *,
+    extractor,
+    log_label: str,
+) -> SearchResult:
+    """Shared CDP-search body. Calls Chrome, applies the URL extractor,
+    and on Google-CAPTCHA pauses for the user before retrying."""
+    for attempt in range(1, _CAPTCHA_RETRY_LIMIT + 1):
+        _throttle()
+        url = GOOGLE_BASE + _quote(query)
+        logger.info("%s: %s", log_label, query)
+        with cdp_session() as (_browser, ctx):
+            page = ctx.new_page()
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=20_000)
+                html = page.content()
+            finally:
+                page.close()
+        if _is_google_captcha(html):
+            logger.warning(
+                "captcha detected (html %d bytes, attempt %d/%d)",
+                len(html), attempt, _CAPTCHA_RETRY_LIMIT,
+            )
+            if attempt >= _CAPTCHA_RETRY_LIMIT:
+                raise GoogleCaptchaError(
+                    f"google captcha persists after {_CAPTCHA_RETRY_LIMIT} retries"
+                )
+            _wait_for_captcha_solve(query)
+            continue
+        urls = sorted(extractor(html))
+        return SearchResult(query=query, urls=urls, page_html_size=len(html))
+    # Loop falls through only when we hit the captcha cap above; keep
+    # mypy happy:
+    raise GoogleCaptchaError("unreachable")
+
+
+class GoogleCaptchaError(RuntimeError):
+    """Raised when Google's CAPTCHA persists past the retry budget."""
+
+
 def google_search(query: str) -> SearchResult:
     """Drive Chrome to Google, return cleaned URLs found in the results.
 
@@ -206,18 +298,7 @@ def google_search(query: str) -> SearchResult:
     Kasada). Google sees a real signed-in browser, so results are
     high-quality.
     """
-    _throttle()
-    url = GOOGLE_BASE + _quote(query)
-    logger.info("google search: %s", query)
-    with cdp_session() as (_browser, ctx):
-        page = ctx.new_page()
-        try:
-            page.goto(url, wait_until="domcontentloaded", timeout=20_000)
-            html = page.content()
-        finally:
-            page.close()
-    urls = sorted(_extract_urls(html))
-    return SearchResult(query=query, urls=urls, page_html_size=len(html))
+    return _do_google_search(query, extractor=_extract_urls, log_label="google search")
 
 
 def google_search_general(query: str) -> SearchResult:
@@ -227,18 +308,9 @@ def google_search_general(query: str) -> SearchResult:
     address phrase?' — evidence the unit was built and listed at some
     point, even outside REA/Domain.
     """
-    _throttle()
-    url = GOOGLE_BASE + _quote(query)
-    logger.info("google search (general): %s", query)
-    with cdp_session() as (_browser, ctx):
-        page = ctx.new_page()
-        try:
-            page.goto(url, wait_until="domcontentloaded", timeout=20_000)
-            html = page.content()
-        finally:
-            page.close()
-    urls = sorted(_extract_general_urls(html))
-    return SearchResult(query=query, urls=urls, page_html_size=len(html))
+    return _do_google_search(
+        query, extractor=_extract_general_urls, log_label="google search (general)",
+    )
 
 
 def _quote(s: str) -> str:
