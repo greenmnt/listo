@@ -265,52 +265,83 @@ def parse_pdp(html: str) -> ParsedPdp | None:
 
 
 def persist(parsed: ParsedPdp, *, raw_page_id: int, fetch_url: str) -> int:
-    """Insert a domain_properties row + one domain_sales row per timeline event.
+    """Upsert a domain_properties row + one domain_sales row per timeline event.
 
-    Returns the inserted domain_properties.id.
+    Keyed on `domain_property_id` (Domain's own ID for the property, e.g.
+    'AS-2461-VY'). Rerunning the scraper for the same listing refreshes
+    all parsed fields and the raw_property_json blob without leaving
+    duplicate rows behind.
+
+    Returns the domain_properties.id of the upserted row.
     """
-    now = datetime.utcnow()
-    with session_scope() as s:
-        dp = DomainProperty(
-            raw_page_id=raw_page_id,
-            property_id=None,
-            domain_property_id=parsed.domain_property_id,
-            domain_apollo_id=parsed.domain_apollo_id,
-            url_slug=parsed.url_slug,
-            url=fetch_url[:1024],
-            display_address=parsed.display_address,
-            unit_number=parsed.unit_number,
-            street_number=parsed.street_number,
-            street_name=parsed.street_name,
-            street_type=parsed.street_type,
-            suburb=parsed.suburb,
-            postcode=parsed.postcode,
-            state=parsed.state,
-            lat=parsed.lat,
-            lng=parsed.lng,
-            lot_number=parsed.lot_number,
-            plan_number=parsed.plan_number,
-            property_type=parsed.property_type,
-            bedrooms=parsed.bedrooms,
-            bathrooms=parsed.bathrooms,
-            parking_spaces=parsed.parking_spaces,
-            land_area_m2=parsed.land_area_m2,
-            internal_area_m2=parsed.internal_area_m2,
-            valuation_low=parsed.valuation_low,
-            valuation_mid=parsed.valuation_mid,
-            valuation_high=parsed.valuation_high,
-            valuation_confidence=parsed.valuation_confidence,
-            valuation_date=parsed.valuation_date,
-            rent_estimate_weekly=parsed.rent_estimate_weekly,
-            rent_yield_pct=parsed.rent_yield_pct,
-            raw_property_json=parsed.raw_property,
-            fetched_at=now,
-            parsed_at=now,
-        )
-        s.add(dp)
-        s.flush()
-        dp_id = dp.id
+    from sqlalchemy.dialects.mysql import insert as mysql_insert
+    from sqlalchemy import select as sa_select
 
+    now = datetime.utcnow()
+    values = dict(
+        raw_page_id=raw_page_id,
+        property_id=None,
+        domain_property_id=parsed.domain_property_id,
+        domain_apollo_id=parsed.domain_apollo_id,
+        url_slug=parsed.url_slug,
+        url=fetch_url[:1024],
+        display_address=parsed.display_address,
+        unit_number=parsed.unit_number,
+        street_number=parsed.street_number,
+        street_name=parsed.street_name,
+        street_type=parsed.street_type,
+        suburb=parsed.suburb,
+        postcode=parsed.postcode,
+        state=parsed.state,
+        lat=parsed.lat,
+        lng=parsed.lng,
+        lot_number=parsed.lot_number,
+        plan_number=parsed.plan_number,
+        property_type=parsed.property_type,
+        bedrooms=parsed.bedrooms,
+        bathrooms=parsed.bathrooms,
+        parking_spaces=parsed.parking_spaces,
+        land_area_m2=parsed.land_area_m2,
+        internal_area_m2=parsed.internal_area_m2,
+        valuation_low=parsed.valuation_low,
+        valuation_mid=parsed.valuation_mid,
+        valuation_high=parsed.valuation_high,
+        valuation_confidence=parsed.valuation_confidence,
+        valuation_date=parsed.valuation_date,
+        rent_estimate_weekly=parsed.rent_estimate_weekly,
+        rent_yield_pct=parsed.rent_yield_pct,
+        raw_property_json=parsed.raw_property,
+        fetched_at=now,
+        parsed_at=now,
+    )
+
+    with session_scope() as s:
+        stmt = mysql_insert(DomainProperty).values(**values)
+        # Refresh every column on conflict — re-runs may have updated
+        # valuations, timelines, or the price-history payload. Skip
+        # `id` and `property_id` (the latter is set by a separate
+        # consolidation step that takes priority over scraper output).
+        update_cols = {
+            k: stmt.inserted[k]
+            for k in values
+            if k not in ("property_id",)
+        }
+        s.execute(stmt.on_duplicate_key_update(**update_cols))
+        # Resolve the natural-key row to get its id back.
+        dp_id = s.execute(
+            sa_select(DomainProperty.id).where(
+                DomainProperty.domain_property_id == parsed.domain_property_id
+            )
+        ).scalar_one()
+
+        # Re-runs replace the timeline entirely — Domain's price-
+        # history blob is the source of truth, and a fresh fetch may
+        # have new events / revised prices / removed errors. Without
+        # this, every scrape appended duplicate DomainSale rows.
+        from sqlalchemy import delete as sa_delete
+        s.execute(
+            sa_delete(DomainSale).where(DomainSale.domain_property_id == dp_id)
+        )
         for ev in parsed.timeline:
             agency = ev.get("agency") or {}
             sale_meta = ev.get("saleMetadata") or {}

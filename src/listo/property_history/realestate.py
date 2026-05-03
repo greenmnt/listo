@@ -329,47 +329,69 @@ def parse_pdp(html: str) -> ParsedReaPdp | None:
 
 
 def persist(parsed: ParsedReaPdp, *, raw_page_id: int, fetch_url: str) -> int:
-    now = datetime.utcnow()
-    with session_scope() as s:
-        rp = RealestateProperty(
-            raw_page_id=raw_page_id,
-            property_id=None,
-            rea_property_id=parsed.rea_property_id,
-            url_slug=parsed.url_slug,
-            url=fetch_url[:1024],
-            pca_property_url=parsed.pca_property_url,
-            display_address=parsed.display_address,
-            unit_number=parsed.unit_number,
-            street_number=parsed.street_number,
-            street_name=parsed.street_name,
-            suburb=parsed.suburb,
-            postcode=parsed.postcode,
-            state=parsed.state,
-            lat=parsed.lat,
-            lng=parsed.lng,
-            property_type=parsed.property_type,
-            bedrooms=parsed.bedrooms,
-            bathrooms=parsed.bathrooms,
-            car_spaces=parsed.car_spaces,
-            land_area_m2=parsed.land_area_m2,
-            floor_area_m2=parsed.floor_area_m2,
-            year_built=parsed.year_built,
-            status_label=parsed.status_label,
-            market_status=parsed.market_status,
-            valuation_low=parsed.valuation_low,
-            valuation_mid=parsed.valuation_mid,
-            valuation_high=parsed.valuation_high,
-            valuation_confidence=parsed.valuation_confidence,
-            rent_estimate_weekly=parsed.rent_estimate_weekly,
-            rent_yield_pct=parsed.rent_yield_pct,
-            raw_property_json=parsed.raw_property,
-            fetched_at=now,
-            parsed_at=now,
-        )
-        s.add(rp)
-        s.flush()
-        rp_id = rp.id
+    """Upsert a realestate_properties row + its timeline events.
 
+    Keyed on `rea_property_id` (REA's own numeric id). Re-runs refresh
+    every parsed field and replace the timeline rather than appending
+    duplicates.
+    """
+    from sqlalchemy.dialects.mysql import insert as mysql_insert
+    from sqlalchemy import select as sa_select, delete as sa_delete
+
+    now = datetime.utcnow()
+    values = dict(
+        raw_page_id=raw_page_id,
+        property_id=None,
+        rea_property_id=parsed.rea_property_id,
+        url_slug=parsed.url_slug,
+        url=fetch_url[:1024],
+        pca_property_url=parsed.pca_property_url,
+        display_address=parsed.display_address,
+        unit_number=parsed.unit_number,
+        street_number=parsed.street_number,
+        street_name=parsed.street_name,
+        suburb=parsed.suburb,
+        postcode=parsed.postcode,
+        state=parsed.state,
+        lat=parsed.lat,
+        lng=parsed.lng,
+        property_type=parsed.property_type,
+        bedrooms=parsed.bedrooms,
+        bathrooms=parsed.bathrooms,
+        car_spaces=parsed.car_spaces,
+        land_area_m2=parsed.land_area_m2,
+        floor_area_m2=parsed.floor_area_m2,
+        year_built=parsed.year_built,
+        status_label=parsed.status_label,
+        market_status=parsed.market_status,
+        valuation_low=parsed.valuation_low,
+        valuation_mid=parsed.valuation_mid,
+        valuation_high=parsed.valuation_high,
+        valuation_confidence=parsed.valuation_confidence,
+        rent_estimate_weekly=parsed.rent_estimate_weekly,
+        rent_yield_pct=parsed.rent_yield_pct,
+        raw_property_json=parsed.raw_property,
+        fetched_at=now,
+        parsed_at=now,
+    )
+    with session_scope() as s:
+        stmt = mysql_insert(RealestateProperty).values(**values)
+        update_cols = {
+            k: stmt.inserted[k] for k in values if k not in ("property_id",)
+        }
+        s.execute(stmt.on_duplicate_key_update(**update_cols))
+        rp_id = s.execute(
+            sa_select(RealestateProperty.id).where(
+                RealestateProperty.rea_property_id == parsed.rea_property_id
+            )
+        ).scalar_one()
+
+        # Replace the timeline — same reasoning as the Domain side.
+        s.execute(
+            sa_delete(RealestateSale).where(
+                RealestateSale.realestate_property_id == rp_id
+            )
+        )
         for ev in parsed.timeline:
             s.add(RealestateSale(
                 realestate_property_id=rp_id,
