@@ -35,6 +35,10 @@ from listo.models import (
     CouncilApplicationDocument,
 )
 from listo.da_summaries.aggregate import _norm_name, _upsert_company
+from listo.da_summaries.applicant_letter import (
+    ParsedApplicantLetter,
+    parse_applicant_letter,
+)
 from listo.da_summaries.cogc_correspondence import (
     ParsedCorrespondence,
     extract_inline_co_agent,
@@ -84,6 +88,7 @@ PLAN_DOC_TYPES = (
 # queryable in entity_evidence under the previous version string.
 EXTRACTOR_CORRESPONDENCE = "cogc_correspondence_regex_v1"
 EXTRACTOR_PLANS = "plans_title_regex_v1"
+EXTRACTOR_APPLICANT_LETTER = "applicant_letter_regex_v1"
 
 # Plans larger than this hang pymupdf for minutes (very complex
 # vector content). Most house/duplex plans are <5MB; only very
@@ -146,6 +151,32 @@ def _extract_emit_plan(
                 (inline_agent, "agent", "refer_by_name", "medium", "company")
             )
 
+    return emissions
+
+
+def _extract_emit_applicant(
+    parsed: ParsedApplicantLetter,
+) -> list[tuple[str, str, str, str, str]]:
+    """Turn ParsedApplicantLetter into (name, role, source_field,
+    confidence, entity_type) emissions. The applicant firm and its
+    individual signatory both get role 'agent' — the firm is acting
+    on behalf of the property owner."""
+    emissions: list[tuple[str, str, str, str, str]] = []
+    if parsed.letterhead_company:
+        emissions.append((
+            parsed.letterhead_company, "agent", "letterhead", "high", "company",
+        ))
+    if (
+        parsed.signoff_company
+        and parsed.signoff_company != parsed.letterhead_company
+    ):
+        emissions.append((
+            parsed.signoff_company, "agent", "signoff_company", "high", "company",
+        ))
+    if parsed.signoff_name:
+        emissions.append((
+            parsed.signoff_name, "agent", "signoff_name", "high", "individual",
+        ))
     return emissions
 
 
@@ -332,6 +363,7 @@ def _harvest(s, rows: Iterable) -> dict:
         "docs_text_extracted": 0,
         "docs_text_skipped": 0,
         "docs_cogc": 0,
+        "docs_applicant_letter": 0,
         "docs_plans_with_block": 0,
         # Plans we scanned but couldn't extract any entity from. By law
         # every plan PDF must identify a builder/architect/owner-builder,
@@ -492,12 +524,51 @@ def _harvest_one(s, r, stats: dict) -> None:
         )
         stats["docs_text_extracted"] += 1
 
+    # Try COGC first. is_cogc can over-fire on applicant letters that
+    # mention council in their recipient block, so we only commit to
+    # COGC if the parser actually produces emissions. Otherwise fall
+    # through to the applicant-letter parser (which has its own
+    # stricter `looks_like_council_authored` gate).
+    cogc_emissions: list[tuple[str, str, str, str, str]] = []
     parsed = parse_cogc_letter(text)
-    if parsed is None or not parsed.is_cogc:
-        return
-    stats["docs_cogc"] += 1
+    if parsed is not None and parsed.is_cogc:
+        cogc_emissions = _extract_emit_plan(parsed)
 
-    emissions = _extract_emit_plan(parsed)
+    if cogc_emissions:
+        stats["docs_cogc"] += 1
+        _emit_correspondence_rows(
+            s, r=r, text=text, emissions=cogc_emissions,
+            extractor=EXTRACTOR_CORRESPONDENCE, stats=stats,
+        )
+        return
+
+    parsed_applicant = parse_applicant_letter(text)
+    if parsed_applicant is None:
+        return
+    stats["docs_applicant_letter"] += 1
+    emissions = _extract_emit_applicant(parsed_applicant)
+    _emit_correspondence_rows(
+        s, r=r, text=text, emissions=emissions,
+        extractor=EXTRACTOR_APPLICANT_LETTER, stats=stats,
+    )
+
+
+def _emit_correspondence_rows(
+    s, *,
+    r,
+    text: str,
+    emissions: list[tuple[str, str, str, str, str]],
+    extractor: str,
+    stats: dict,
+) -> None:
+    """Persist evidence + application_entity rows for a flat list of
+    correspondence emissions. Shared by the COGC and applicant-letter
+    paths.
+
+    `emissions` is a list of (name, role, source_field, confidence,
+    entity_type) tuples — same shape produced by `_extract_emit_plan`
+    and `_extract_emit_applicant`.
+    """
     if not emissions:
         return
     stats["emissions"] += len(emissions)
@@ -527,8 +598,6 @@ def _harvest_one(s, r, stats: dict) -> None:
                 evidence_text = doc_layout.concat_text
 
         if evidence_span is None:
-            # Fallback: locate name in the cached parser text. Loses
-            # layout but at least anchors the span for ML training.
             evidence_span = find_offset_in_text(text, name)
 
         if evidence_span is not None:
@@ -536,7 +605,7 @@ def _harvest_one(s, r, stats: dict) -> None:
                 s,
                 application_id=r.application_id,
                 source_doc_id=r.id,
-                extractor=EXTRACTOR_CORRESPONDENCE,
+                extractor=extractor,
                 source_text=evidence_text,
                 span_start=evidence_span[0],
                 span_end=evidence_span[1],

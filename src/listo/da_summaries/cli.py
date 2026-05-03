@@ -233,6 +233,7 @@ def harvest_entities(
     typer.echo(f"  text extracted now: {stats['docs_text_extracted']}")
     typer.echo(f"  text skipped:       {stats['docs_text_skipped']}")
     typer.echo(f"  cogc letters:       {stats['docs_cogc']}")
+    typer.echo(f"  applicant letters:  {stats.get('docs_applicant_letter', 0)}")
     typer.echo(f"  plans w/ block:     {stats['docs_plans_with_block']}")
     typer.echo(f"  plans w/ NO hit:    {stats['docs_plans_no_hit']} (recall failures)")
     typer.echo(f"  plans skipped (>{stats.get('docs_plans_skipped_large', 0) and '10MB' or '10MB'}):  {stats['docs_plans_skipped_large']}")
