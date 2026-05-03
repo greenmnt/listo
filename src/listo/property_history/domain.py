@@ -68,15 +68,15 @@ def slug_for_address(
         1/124 Sunshine Pde, Miami QLD 4220 → 1-124-sunshine-parade-miami-qld-4220
 
     Domain's slug uses the long form of the street type ('parade' not 'pde')
-    — without expansion, the URL 404s rather than redirecting. We expand the
-    last token of `street` if it's a known abbreviation.
+    — without expansion, the URL 404s rather than redirecting. We canonicalise
+    the last token of `street` to the canonical long form (handles short
+    codes 'pde' → 'parade' AND variant long forms 'Boulevarde' → 'boulevard').
     """
-    from listo.address import long_form
+    from listo.address import canonical_long_form
 
-    # Expand the trailing street-type token to long form.
     tokens = (street or "").split()
     if tokens:
-        tokens[-1] = long_form(tokens[-1])
+        tokens[-1] = canonical_long_form(tokens[-1])
     expanded_street = " ".join(tokens)
 
     parts: list[str] = []

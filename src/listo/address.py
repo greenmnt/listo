@@ -54,16 +54,35 @@ def long_form(street_type: str) -> str:
 
 
 def _build_long_form() -> None:
-    """Populate _LONG_FORM from _SUFFIX_MAP. The first long-form spelling we
-    see for each abbreviation wins (so 'parade' for 'pde', not 'parad'/etc).
+    """Populate _LONG_FORM from _SUFFIX_MAP. First-seen long form
+    wins, so the canonical spelling listed first in `_SUFFIX_MAP`
+    becomes the URL form. (Picking the *longest* would resolve 'bvd'
+    to 'boulevarde' — Domain's slug uses 'boulevard'.)
     """
     for long, short in _SUFFIX_MAP.items():
         if long == short:
             continue  # 'pde' → 'pde'; not a long form
-        # Pick the longest spelling for each short code.
-        existing = _LONG_FORM.get(short)
-        if existing is None or len(long) > len(existing):
+        if short not in _LONG_FORM:
             _LONG_FORM[short] = long
+
+
+def canonical_long_form(street_type: str) -> str:
+    """Convert *any* street-type spelling (long, short, or variant
+    long like 'Boulevarde') to the canonical long form Domain uses
+    in its URL slugs.
+
+    'Boulevarde' → 'boulevard'
+    'pde'        → 'parade'
+    'Pde'        → 'parade'
+    'unknown'    → 'unknown'   (passes through)
+    """
+    if not _LONG_FORM:
+        _build_long_form()
+    s = street_type.strip().lower()
+    # First normalise any variant long form down to its abbreviation,
+    # then look up the canonical long form for that abbreviation.
+    short = _SUFFIX_MAP.get(s, s)
+    return _LONG_FORM.get(short, street_type)
 # A street number with trailing alpha suffix: "11a", "18b", "11abc". In AU
 # property practice this nearly always denotes a half-of-duplex subdivision
 # of the original lot, equivalent to "1/11" / "2/11" notation. Treating the
