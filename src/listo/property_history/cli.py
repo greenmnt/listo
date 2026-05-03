@@ -270,7 +270,19 @@ def _drop_already_scraped(targets: list[_Target]) -> list[_Target]:
     """
     if not targets:
         return targets
+    from listo.address import canonical_long_form
     from listo.property_history.scrape_attempts import addresses_with_attempt
+
+    def _prefix_for(target: _Target) -> str:
+        """Canonicalise the street-type token before matching. Council
+        rows store variants like 'Boulevarde' / 'Wy', but Domain/REA
+        responses come back with the canonical 'Boulevard' / 'Way'.
+        Without this normalisation the LIKE-prefix match misses every
+        such address and dedup re-attempts forever."""
+        tokens = target.parsed_street.split()
+        if tokens:
+            tokens[-1] = canonical_long_form(tokens[-1])
+        return f"{' '.join(tokens)}, {target.parsed_suburb}".lower()
 
     with session_scope() as s:
         domain_addrs = [r[0] for r in s.execute(sql_text(
@@ -283,33 +295,33 @@ def _drop_already_scraped(targets: list[_Target]) -> list[_Target]:
     domain_lc = [a.lower() for a in domain_addrs]
     rea_lc = [a.lower() for a in rea_addrs]
 
-    # Addresses Domain returned 404 for — we've already tried, no point
-    # re-attempting until the user manually clears the attempt rows.
-    domain_not_found = [
+    # Addresses we've already attempted via direct-slug. 'found' is
+    # treated as covered too — sometimes Domain's display_address
+    # comes back in a format that doesn't match our prefix logic
+    # (e.g. unit-prefixed slugs, double-space artefacts), so a
+    # successful attempt is the most reliable "yes we have it" signal.
+    domain_attempted = {
         a.lower() for a in addresses_with_attempt(
-            source="domain", results=("not_found",),
+            source="domain", results=("found", "not_found"),
         )
-    ]
-    rea_not_found = [
+    }
+    rea_attempted = {
         a.lower() for a in addresses_with_attempt(
-            source="realestate", results=("not_found",),
+            source="realestate", results=("found", "not_found"),
         )
-    ]
+    }
 
     kept: list[_Target] = []
     skipped_both = 0
     skipped_via_notfound = 0
     skipped_partial = 0  # informational: counted as kept (we'll re-run)
     for t in targets:
-        prefix = f"{t.parsed_street}, {t.parsed_suburb}".lower()
+        prefix = _prefix_for(t)
         in_domain = any(a.startswith(prefix) for a in domain_lc)
         in_rea = any(a.startswith(prefix) for a in rea_lc)
-        # The not-found tables key on the freeform address we passed
-        # to fetch_by_address (not the parsed street/suburb), so do an
-        # equality check on that exact string.
         nf_addr = t.search_address.lower()
-        domain_attempted_404 = nf_addr in domain_not_found
-        rea_attempted_404 = nf_addr in rea_not_found
+        domain_attempted_404 = nf_addr in domain_attempted
+        rea_attempted_404 = nf_addr in rea_attempted
 
         domain_covered = in_domain or domain_attempted_404
         rea_covered = in_rea or rea_attempted_404
