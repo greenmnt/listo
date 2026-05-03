@@ -83,6 +83,82 @@ def _split_address(address: str) -> tuple[str, str, str, str]:
     return " ".join(tokens), suburb, state, postcode
 
 
+_PDP_SLUG_RE = re.compile(
+    r"/(?:property|property-profile)/([a-z0-9][a-z0-9-]*)/?"
+)
+# REA sold listing: realestate.com.au/sold/property-<type>-<state>-<suburb>-<listing_id>
+_REA_SOLD_PATH_RE = re.compile(
+    r"^https?://www\.realestate\.com\.au/sold/([a-z0-9+-]+?)-\d{6,}\b", re.IGNORECASE,
+)
+# Domain listing: domain.com.au/<address-slug>-<listing_id>
+_DOMAIN_LISTING_PATH_RE = re.compile(
+    r"^https?://www\.domain\.com\.au/(?!property-profile/)([a-z0-9-]+?)-\d{6,}\b",
+    re.IGNORECASE,
+)
+
+
+def _slug_matches_parent(url: str, search_address: str, suburb_hint: str | None) -> bool:
+    """Return True if the discovered URL refers to the same street # /
+    suburb as the parent DA. Filters out neighbours that Google
+    surfaces alongside the target.
+
+    Three URL shapes the discovery returns:
+      - PDP:           /property/{slug} or /property-profile/{slug}
+                       — slug starts with '<num>-' (or unit prefix)
+      - Domain listing /{address-slug}-{listing_id}
+                       — slug starts with '<num>-'
+      - REA sold:      /sold/property-<type>-<state>-<suburb>-{listing_id}
+                       — has suburb but NO street number, so we can
+                         only match on suburb
+
+    Permissive on parse failure: when the slug shape is unrecognised
+    or the parent street # can't be extracted, we let the URL
+    through so the orchestrator still gets to attempt the fetch.
+    """
+    m_num = re.match(r"^\s*(\d+)\b", search_address)
+    parent_num = m_num.group(1) if m_num else None
+
+    suburb_token = (
+        suburb_hint.lower().replace(" ", "-") if suburb_hint else None
+    )
+
+    # 1) PDP / property-profile shape — match on street #
+    m_slug = _PDP_SLUG_RE.search(url)
+    if m_slug:
+        slug = m_slug.group(1).lower()
+        return _check_addr_slug(slug, parent_num, suburb_token)
+
+    # 2) Domain listing shape — same street # match
+    m_dom = _DOMAIN_LISTING_PATH_RE.match(url)
+    if m_dom:
+        return _check_addr_slug(m_dom.group(1).lower(), parent_num, suburb_token)
+
+    # 3) REA sold shape — only suburb is in the URL; street # isn't
+    m_sold = _REA_SOLD_PATH_RE.match(url)
+    if m_sold:
+        if not suburb_token:
+            return True
+        return suburb_token in m_sold.group(1).lower()
+
+    return True  # unknown shape; don't filter aggressively
+
+
+def _check_addr_slug(slug: str, parent_num: str | None, suburb_token: str | None) -> bool:
+    """Shared check for PDP-style and Domain-listing slugs that begin
+    with the street number (with optional unit prefix)."""
+    if parent_num is None:
+        return True
+    body = slug
+    body = re.sub(r"^unit-\d+[a-z]?-", "", body)        # REA: unit-2-25-...
+    body = re.sub(r"^\d+[a-z]?-(?=\d+-)", "", body)     # Domain: 1-7-...
+    m_body = re.match(r"^(\d+)[a-z]?-", body)
+    if not m_body or m_body.group(1) != parent_num:
+        return False
+    if suburb_token and suburb_token not in body:
+        return False
+    return True
+
+
 def run(address: str, *, fetch_listings: bool = True, throttle: float = 2.0) -> PropertyHistoryRun:
     """Execute the full pipeline for one address.
 
@@ -113,15 +189,44 @@ def run(address: str, *, fetch_listings: bool = True, throttle: float = 2.0) -> 
         postcode=postcode or None,
     )
     logger.info(
-        "  rea_pdps=%d  rea_sold=%d  domain_pdps=%d  domain_listings=%d",
+        "  rea_pdps=%d  rea_sold=%d  domain_pdps=%d  domain_listings=%d (raw)",
         len(discovery.rea_pdp_urls),
         len(discovery.rea_sold_urls),
         len(discovery.domain_pdp_urls),
         len(discovery.domain_listing_urls),
     )
+    # Google's results frequently mix the target property with its
+    # neighbours (e.g. searching '7 Alec Ave' surfaces #4 and #11 too).
+    # Without filtering, the orchestrator would fetch all of them and
+    # tag the neighbour data under THIS DA's context, which is just
+    # wrong. Keep only URLs whose slug matches the parent street_number
+    # (or has a unit prefix to that same number — captures post-redev
+    # children like 1/7 and 2/7 for duplex detection).
+    rea_pdp_urls = [u for u in discovery.rea_pdp_urls
+                    if _slug_matches_parent(u, search_address, suburb_hint)]
+    rea_sold_urls = [u for u in discovery.rea_sold_urls
+                     if _slug_matches_parent(u, search_address, suburb_hint)]
+    domain_pdp_urls = [u for u in discovery.domain_pdp_urls
+                       if _slug_matches_parent(u, search_address, suburb_hint)]
+    domain_listing_urls = [u for u in discovery.domain_listing_urls
+                           if _slug_matches_parent(u, search_address, suburb_hint)]
+    n_dropped = (
+        (len(discovery.rea_pdp_urls) - len(rea_pdp_urls))
+        + (len(discovery.rea_sold_urls) - len(rea_sold_urls))
+        + (len(discovery.domain_pdp_urls) - len(domain_pdp_urls))
+        + (len(discovery.domain_listing_urls) - len(domain_listing_urls))
+    )
+    if n_dropped:
+        logger.info(
+            "  dropped %d url(s) whose slug didn't match parent street # ("
+            "rea_pdps=%d rea_sold=%d domain_pdps=%d domain_listings=%d after filter)",
+            n_dropped,
+            len(rea_pdp_urls), len(rea_sold_urls),
+            len(domain_pdp_urls), len(domain_listing_urls),
+        )
 
     # -------- 3. REA PDPs (parent + unit children) --------
-    for url in discovery.rea_pdp_urls:
+    for url in rea_pdp_urls:
         logger.info("REA PDP fetch: %s", url)
         time.sleep(throttle)
         try:
@@ -139,7 +244,7 @@ def run(address: str, *, fetch_listings: bool = True, throttle: float = 2.0) -> 
     # the unit-prefixed children Google surfaced ('1/124', '2/124', etc.).
     # store_raw_page dedups on (url_hash, content_hash) so re-fetching the
     # parent here is harmless.
-    for url in discovery.domain_pdp_urls:
+    for url in domain_pdp_urls:
         logger.info("Domain PDP fetch: %s", url)
         try:
             r = domain_pdp.fetch_and_persist(url)
@@ -153,7 +258,7 @@ def run(address: str, *, fetch_listings: bool = True, throttle: float = 2.0) -> 
 
     # -------- 5. Listing-detail pages --------
     if fetch_listings:
-        for url in discovery.rea_sold_urls:
+        for url in rea_sold_urls:
             logger.info("REA listing fetch: %s", url)
             time.sleep(throttle)
             try:
@@ -166,7 +271,7 @@ def run(address: str, *, fetch_listings: bool = True, throttle: float = 2.0) -> 
             except Exception as exc:  # noqa: BLE001
                 counters.errors.append(f"rea_listing {url}: {exc!r}")
 
-        for url in discovery.domain_listing_urls:
+        for url in domain_listing_urls:
             logger.info("Domain listing fetch: %s", url)
             try:
                 _, listing_id, parsed, err = listings_mod.fetch_domain_listing(url)
