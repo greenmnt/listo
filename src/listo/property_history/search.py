@@ -324,8 +324,39 @@ def _human_search(page, query: str) -> None:
         # Heavy results pages may not hit `load` within 20 s — fall
         # through; the content-read retry covers the residual race.
         pass
+    # Wait for a result anchor or the captcha page to actually render.
+    # `load` fires on the initial document; the result tiles are
+    # injected via XHR afterwards. Without this we sometimes capture
+    # an empty results container and miss every URL on the page.
+    _wait_for_results_to_render(page, query=query)
     # Allow deferred result blocks to render.
     time.sleep(random.uniform(0.50, 1.20))
+
+
+def _wait_for_results_to_render(page, *, query: str, timeout_ms: int = 8_000) -> None:
+    """Block until at least one SERP signal is in the live DOM:
+    a result-heading anchor (real-estate or otherwise), the captcha
+    form, or a "no results" message. If none appear within
+    `timeout_ms`, give up — `_do_google_search` will see an empty
+    extraction and log the raw counts itself."""
+    selectors = [
+        'a[jsname="UWckNb"]',                 # Google's result-heading link
+        'a.zReHs',                             # same anchor, class form
+        '#search [data-ved] a[href]',          # generic results-block anchor
+        '#captcha-form',                       # captcha page
+        '#botstuff',                           # "no results" page
+    ]
+    js_any_visible = (
+        "selectors => selectors.some(s => "
+        "{ const e = document.querySelector(s); return !!e; })"
+    )
+    try:
+        page.wait_for_function(js_any_visible, arg=selectors, timeout=timeout_ms)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "no SERP markers rendered within %dms for %r (%s)",
+            timeout_ms, query, exc,
+        )
 
 
 def _do_google_search(
@@ -385,6 +416,19 @@ def _do_google_search(
         # Success — keep the Google tab open across searches so future
         # ones reuse the same captcha-cleared session.
     urls = sorted(extractor(html))
+    if not urls:
+        # Common failure modes: results haven't hydrated yet, Google
+        # is serving a captcha, the URL pattern moved. Surface enough
+        # state for the user to debug without flipping log level.
+        rea_in_page = html.count("realestate.com.au")
+        domain_in_page = html.count("domain.com.au")
+        logger.warning(
+            "%s: 0 urls extracted from %d-byte page "
+            "(realestate.com.au substring count=%d, domain.com.au=%d, "
+            "captcha=%s)",
+            log_label, len(html), rea_in_page, domain_in_page,
+            _is_google_captcha(html),
+        )
     return SearchResult(query=query, urls=urls, page_html_size=len(html))
 
 
