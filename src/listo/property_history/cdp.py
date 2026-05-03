@@ -161,10 +161,47 @@ def fetch_html_via_google_click(
 
         target_page = None
         http_status = 0
-        # Strategy 1: click an anchor whose href contains the target.
+        # Strategy 1: click the canonical result-heading anchor for
+        # the target URL. Try the most specific selectors first so we
+        # don't accidentally click a "Read more" excerpt link, an
+        # about-this-result anchor, or a sidebar duplicate.
+        #
+        # Google result heading: <a jsname="UWckNb" class="zReHs"
+        #                          href="...realestate.com.au/...">
+        #                          <h3>...</h3>
+        #                        </a>
+        candidate_selectors = (
+            f'a.zReHs[href="{url}"]',
+            f'a[jsname="UWckNb"][href="{url}"]',
+            f'a:has(h3)[href="{url}"]',
+            f'a.zReHs[href*="{url}"]',
+            f'a[jsname="UWckNb"][href*="{url}"]',
+            f'a:has(h3)[href*="{url}"]',
+            f'a[href*="{url}"]',
+        )
         try:
-            google_tab.wait_for_selector(f'a[href*="{url}"]', timeout=5_000)
-            link = google_tab.locator(f'a[href*="{url}"]').first
+            chosen_selector: str | None = None
+            link = None
+            for sel in candidate_selectors:
+                try:
+                    google_tab.wait_for_selector(sel, timeout=2_000)
+                except Exception:  # noqa: BLE001
+                    continue
+                link = google_tab.locator(sel).first
+                chosen_selector = sel
+                break
+            if link is None:
+                raise RuntimeError(
+                    f"no result anchor for {url} on Google results page"
+                )
+            try:
+                actual_href = link.get_attribute("href") or ""
+            except Exception:  # noqa: BLE001
+                actual_href = ""
+            logger.info(
+                "click-through selector=%r → href=%s",
+                chosen_selector, actual_href,
+            )
             with ctx.expect_page(timeout=timeout_ms) as new_page_info:
                 modifier = "Meta" if os.uname().sysname == "Darwin" else "Control"
                 link.click(modifiers=[modifier])
