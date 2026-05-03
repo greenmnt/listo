@@ -163,6 +163,11 @@ def fetch_html_via_google_click(
         #                        </a>
         # Most specific first — avoid the "Read more" excerpt link,
         # the about-this-result anchor, and sidebar duplicates.
+        # Crucially the LAST fallback excludes anchors whose href
+        # points at google.com itself: Google's "AI Mode" links
+        # embed the destination URL inside `?q=<url>&udm=50`, so a
+        # naive `a[href*="{url}"]` matched THOSE and we clicked
+        # straight into Google AI search instead of the property.
         candidate_selectors = (
             f'a.zReHs[href="{url}"]',
             f'a[jsname="UWckNb"][href="{url}"]',
@@ -170,26 +175,25 @@ def fetch_html_via_google_click(
             f'a.zReHs[href*="{url}"]',
             f'a[jsname="UWckNb"][href*="{url}"]',
             f'a:has(h3)[href*="{url}"]',
-            f'a[href*="{url}"]',
+            f'a[href^="http"][href*="{url}"]:not([href*="google.com"])',
         )
 
-        # If the URL anchor is ALREADY on the current Google tab — it
-        # almost always is, because the orchestrator's discovery phase
-        # just searched for the address and surfaced this URL — click
-        # it directly. Don't waste a query (and a captcha-risk roll)
-        # re-searching for the URL itself, because Google rarely
-        # indexes property URLs as their own results.
-        already_present = False
-        for sel in candidate_selectors:
-            if google_tab.locator(sel).count():
-                already_present = True
-                break
+        # If the URL anchor is ALREADY on the current Google tab —
+        # almost always the case because the orchestrator's discovery
+        # phase just searched for the address and surfaced this URL —
+        # click it directly. If it's NOT present (likely because
+        # discovery's site:-fallback overwrote the tab), DON'T type
+        # the URL into search: Google rarely indexes property URLs
+        # as queries and instead returns AI-Mode shortcuts that the
+        # loose selector used to match. Raise and let the outer
+        # try/except fall through to the direct-goto path.
+        already_present = any(
+            google_tab.locator(sel).count() for sel in candidate_selectors
+        )
         if not already_present:
-            logger.info(
-                "click-through: URL not on current Google tab — "
-                "running a fresh search for it (%s)", url,
+            raise RuntimeError(
+                f"URL not on current Google tab; falling back to direct goto: {url}"
             )
-            _human_search(google_tab, url)
 
         target_page = None
         http_status = 0
