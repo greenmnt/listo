@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import random
 import re
 import time
 from dataclasses import dataclass
@@ -250,23 +251,97 @@ def _wait_for_captcha_solve(query: str) -> None:
 _CAPTCHA_RETRY_LIMIT = 3
 
 
+_GOOGLE_HOME = "https://www.google.com/"
+_GOOGLE_SEARCH_INPUT = 'textarea[name="q"], input[name="q"]'
+
+
+def _find_google_tab(ctx):
+    """Return an existing Google tab from the context, if any.
+    Prefers a tab already on a results page (so a captcha solve there
+    is reused). Returns None if no Google tab is open."""
+    candidates = []
+    for p in ctx.pages:
+        try:
+            u = p.url or ""
+        except Exception:  # noqa: BLE001
+            continue
+        if "google.com" in u:
+            candidates.append((u, p))
+    if not candidates:
+        return None
+    # Prefer search-results tabs over plain google.com home.
+    for u, p in candidates:
+        if "/search" in u:
+            return p
+    return candidates[0][1]
+
+
+def _human_search(page, query: str) -> None:
+    """Type `query` into Google's search input with human-like jitter,
+    then press Enter. Reuses whatever Google tab `page` already is.
+
+    Why type instead of navigating to `?q=...`? Google's bot-detector
+    weights URL navigations harder than in-page typed searches; typing
+    into the existing tab uses up the same captcha-cleared session
+    cookie and reads as a continuing user action."""
+    # If we somehow ended up on a non-Google URL, go home first.
+    try:
+        cur = page.url or ""
+    except Exception:  # noqa: BLE001
+        cur = ""
+    if "google.com" not in cur:
+        page.goto(_GOOGLE_HOME, wait_until="domcontentloaded", timeout=20_000)
+
+    try:
+        page.wait_for_selector(_GOOGLE_SEARCH_INPUT, timeout=5_000)
+    except Exception:  # noqa: BLE001
+        # Search box not found — bounce through home and retry once.
+        page.goto(_GOOGLE_HOME, wait_until="domcontentloaded", timeout=20_000)
+        page.wait_for_selector(_GOOGLE_SEARCH_INPUT, timeout=10_000)
+
+    page.click(_GOOGLE_SEARCH_INPUT)
+    # Clear whatever's in the box.
+    page.keyboard.press("ControlOrMeta+a")
+    page.keyboard.press("Backspace")
+
+    # Variable per-character delay so the pacing looks human.
+    for ch in query:
+        page.keyboard.insert_text(ch)
+        time.sleep(random.uniform(0.04, 0.16))
+        # Occasional longer thinking-pause.
+        if random.random() < 0.06:
+            time.sleep(random.uniform(0.20, 0.55))
+
+    # Tiny settle before submitting.
+    time.sleep(random.uniform(0.30, 0.80))
+    page.keyboard.press("Enter")
+    page.wait_for_load_state("domcontentloaded", timeout=20_000)
+    # Allow deferred result blocks to render.
+    time.sleep(random.uniform(0.50, 1.20))
+
+
 def _do_google_search(
     query: str,
     *,
     extractor,
     log_label: str,
 ) -> SearchResult:
-    """Shared CDP-search body. Calls Chrome, applies the URL extractor,
-    and on Google-CAPTCHA keeps the tab open and pauses for the user
-    to solve the puzzle on the same page before retrying."""
+    """Shared CDP-search body. REUSES an existing Google tab whenever
+    one is open in the live Chrome — so a captcha-cleared session
+    cookie persists across many queries. Types the query into the
+    search box with human-like jitter rather than navigating to
+    `?q=...`."""
     _throttle()
-    url = GOOGLE_BASE + _quote(query)
     logger.info("%s: %s", log_label, query)
     with cdp_session() as (_browser, ctx):
-        # Bring Chrome to the foreground via a focused tab.
-        page = ctx.new_page()
+        page = _find_google_tab(ctx)
+        opened_new_tab = False
+        if page is None:
+            page = ctx.new_page()
+            page.goto(_GOOGLE_HOME, wait_until="domcontentloaded", timeout=20_000)
+            opened_new_tab = True
         try:
-            page.goto(url, wait_until="domcontentloaded", timeout=20_000)
+            _human_search(page, query)
             html = page.content()
             for attempt in range(1, _CAPTCHA_RETRY_LIMIT + 1):
                 if not _is_google_captcha(html):
@@ -275,8 +350,6 @@ def _do_google_search(
                     "captcha detected (html %d bytes, attempt %d/%d)",
                     len(html), attempt, _CAPTCHA_RETRY_LIMIT,
                 )
-                # Bring this tab to front so the user can see + solve
-                # the challenge. (No-op if Chrome is already focused.)
                 try:
                     page.bring_to_front()
                 except Exception:  # noqa: BLE001
@@ -286,17 +359,21 @@ def _do_google_search(
                         f"google captcha persists after {_CAPTCHA_RETRY_LIMIT} retries"
                     )
                 _wait_for_captcha_solve(query)
-                # Reload the same tab to re-evaluate captcha state. If
-                # the user solved it inline, Google usually redirects
-                # to the real results automatically — but reloading
-                # gives us a clean read either way.
-                try:
-                    page.reload(wait_until="domcontentloaded", timeout=20_000)
-                except Exception:  # noqa: BLE001
-                    page.goto(url, wait_until="domcontentloaded", timeout=20_000)
+                # User just solved a captcha on this tab — Google's
+                # cookie now lets us search again. Re-type rather
+                # than reload (we may have lost the query state).
+                _human_search(page, query)
                 html = page.content()
         finally:
-            page.close()
+            # Keep the Google tab open across searches so future
+            # searches reuse the same captcha-cleared session. We only
+            # close if we opened it AND it landed in an obviously bad
+            # state (e.g. blank page).
+            if opened_new_tab and not html:
+                try:
+                    page.close()
+                except Exception:  # noqa: BLE001
+                    pass
     urls = sorted(extractor(html))
     return SearchResult(query=query, urls=urls, page_html_size=len(html))
 
