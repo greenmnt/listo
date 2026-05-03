@@ -694,11 +694,46 @@ def _fetch_docs_for_app(
     )
     download_idx = _select_download_indices(len(ordered_docs))
 
+    # Optional env-var filters that narrow which docs to actually
+    # download (vs. record metadata-only). Used by the targeted
+    # backfill to constrain disk usage.
+    #
+    #   LISTO_DOC_TYPE_WHITELIST="Decision Notice|Plans|Cover Letter|..."
+    #     Pipe-separated case-insensitive substrings the doc_type must
+    #     match. Empty/unset → no filter.
+    #
+    #   LISTO_MAX_DOC_BYTES=10485760
+    #     Skip docs whose portal-reported size exceeds this. 0/unset
+    #     → no cap.
+    import os
+    _whitelist_raw = os.environ.get("LISTO_DOC_TYPE_WHITELIST", "")
+    _whitelist = [s.lower() for s in _whitelist_raw.split("|") if s.strip()]
+    try:
+        _max_bytes = int(os.environ.get("LISTO_MAX_DOC_BYTES", "0"))
+    except ValueError:
+        _max_bytes = 0
+
+    def _passes_filters(ref) -> tuple[bool, str]:
+        if _whitelist:
+            dt = (ref.doc_type or "").lower()
+            if not any(w in dt for w in _whitelist):
+                return False, "doc_type-skip"
+        if _max_bytes:
+            ref_size = parse_size_to_bytes(ref.size_text) or 0
+            if ref_size > _max_bytes:
+                return False, f"size-skip ({ref_size // 1024 // 1024}MB > cap)"
+        return True, ""
+
     target = doc_dir / app_id.replace("/", "_")
     files_done = 0
     for j, ref in enumerate(ordered_docs, start=1):
-        do_download = (j - 1) in download_idx
-        tag = "DOWNLOAD" if do_download else "metadata"
+        in_idx = (j - 1) in download_idx
+        passes, skip_reason = _passes_filters(ref) if in_idx else (False, "")
+        do_download = in_idx and passes
+        if in_idx and not passes:
+            tag = f"metadata ({skip_reason})"
+        else:
+            tag = "DOWNLOAD" if do_download else "metadata"
         logger.info(
             "%s %s   ↳ %d/%d [%s] %s (%s)",
             log_prefix, app_id, j, len(ordered_docs), tag,
