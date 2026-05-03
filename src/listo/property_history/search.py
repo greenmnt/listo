@@ -364,16 +364,18 @@ def _do_google_search(
                 # than reload (we may have lost the query state).
                 _human_search(page, query)
                 html = page.content()
-        finally:
-            # Keep the Google tab open across searches so future
-            # searches reuse the same captcha-cleared session. We only
-            # close if we opened it AND it landed in an obviously bad
-            # state (e.g. blank page).
-            if opened_new_tab and not html:
+        except Exception:
+            # Anything that raised inside the search means we never
+            # got usable results. Clean up only the tab we created
+            # ourselves; let the user's pre-existing Google tab stay.
+            if opened_new_tab:
                 try:
                     page.close()
                 except Exception:  # noqa: BLE001
                     pass
+            raise
+        # Success — keep the Google tab open across searches so future
+        # ones reuse the same captcha-cleared session.
     urls = sorted(extractor(html))
     return SearchResult(query=query, urls=urls, page_html_size=len(html))
 
