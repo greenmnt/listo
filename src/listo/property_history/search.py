@@ -31,7 +31,7 @@ from sqlalchemy.dialects.mysql import insert as mysql_insert
 
 from listo.db import session_scope
 from listo.models import DiscoveredUrl
-from listo.property_history.cdp import cdp_session
+from listo.property_history.cdp import cdp_session, _read_html_with_navigation_retry
 
 
 logger = logging.getLogger(__name__)
@@ -315,7 +315,15 @@ def _human_search(page, query: str) -> None:
     # Tiny settle before submitting.
     time.sleep(random.uniform(0.30, 0.80))
     page.keyboard.press("Enter")
-    page.wait_for_load_state("domcontentloaded", timeout=20_000)
+    # Wait for `load` rather than just domcontentloaded — Google fires
+    # follow-up XHR for result tiles after DCL, and reading content
+    # mid-flight raises 'Page is navigating and changing'.
+    try:
+        page.wait_for_load_state("load", timeout=20_000)
+    except Exception:  # noqa: BLE001
+        # Heavy results pages may not hit `load` within 20 s — fall
+        # through; the content-read retry covers the residual race.
+        pass
     # Allow deferred result blocks to render.
     time.sleep(random.uniform(0.50, 1.20))
 
@@ -342,7 +350,7 @@ def _do_google_search(
             opened_new_tab = True
         try:
             _human_search(page, query)
-            html = page.content()
+            html = _read_html_with_navigation_retry(page, url=query)
             for attempt in range(1, _CAPTCHA_RETRY_LIMIT + 1):
                 if not _is_google_captcha(html):
                     break
@@ -363,7 +371,7 @@ def _do_google_search(
                 # cookie now lets us search again. Re-type rather
                 # than reload (we may have lost the query state).
                 _human_search(page, query)
-                html = page.content()
+                html = _read_html_with_navigation_retry(page, url=query)
         except Exception:
             # Anything that raised inside the search means we never
             # got usable results. Clean up only the tab we created
