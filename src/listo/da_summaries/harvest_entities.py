@@ -95,6 +95,12 @@ EXTRACTOR_APPLICANT_LETTER = "applicant_letter_regex_v1"
 # large multi-stage drawing sets exceed this.
 MAX_PLAN_BYTES = 10 * 1024 * 1024  # 10 MB
 
+# Same per-doc cap for correspondence — bundled IR responses can run
+# 50+ MB with attached technical reports, but the regex parser only
+# needs the cover letter pages. Skip oversize docs rather than burn
+# pymupdf time loading multi-hundred-page bundles.
+MAX_CORRESPONDENCE_BYTES = 10 * 1024 * 1024  # 10 MB
+
 
 logger = logging.getLogger(__name__)
 
@@ -261,7 +267,7 @@ def _upsert_application_entity(
 def _iter_candidate_docs(
     s, app_pk: int | None, limit: int | None,
     type_codes: set[str] | None = None,
-    max_docs_per_app: int | None = 14,
+    max_docs_per_app: int | None = None,
 ):
     """Document rows that might be COGC correspondence or plan title
     blocks, ordered deterministic-ish.
@@ -271,10 +277,13 @@ def _iter_candidate_docs(
     {'MCU','COM','EDA'} for residential redev). Mirrors the
     --types option on `listo council scrape-monthly`.
 
-    `max_docs_per_app` skips applications with more than N total docs
-    — those are typically big mixed-use / apartment / retail projects
-    with 30+ consultants, not the simple house/duplex builds we care
-    about. Default 14 matches the empirical small-DA distribution."""
+    `max_docs_per_app` skips applications with more than N total docs.
+    Default None (no cap) — big projects (apartment blocks, mixed-use)
+    are exactly where most architects/builders/structural engineers
+    live, and the per-doc size cap (`MAX_PLAN_BYTES`,
+    `MAX_CORRESPONDENCE_BYTES`) already protects against single huge
+    files. The 14-doc cap was a proxy for "skip big files" that
+    doubled as "skip big projects" — wrong filter for that goal."""
     q = (
         select(
             CouncilApplicationDocument.id,
@@ -340,7 +349,7 @@ def harvest_all(
     app_pk: int | None = None,
     limit: int | None = None,
     type_codes: set[str] | None = None,
-    max_docs_per_app: int | None = 14,
+    max_docs_per_app: int | None = None,
 ) -> dict:
     """Walk every (or one) application's candidate docs, harvesting entities."""
     with session_scope() as s:
@@ -504,10 +513,22 @@ def _harvest_one(s, r, stats: dict) -> None:
             stats["entity_rows_written"] += 1
         return
 
-    # Correspondence path — pull text once, cache, parse with the
-    # COGC letter parser. Always read raw (un-truncated) PDF text:
-    # `cached_extracted_text` may be the prompt-shaped 12k-cap version
-    # from earlier runs, which loses the COGC footer fingerprints.
+    # Correspondence path — same per-doc size guard as plans. Bundled
+    # IR responses can be 30-50 MB; the regex parser only needs the
+    # cover-letter pages, not the attached technical reports.
+    if r.file_size and r.file_size > MAX_CORRESPONDENCE_BYTES:
+        stats["docs_text_skipped"] += 1
+        logger.info(
+            "correspondence doc %s skipped (file_size=%.1fMB > %dMB cap)",
+            r.file_path, r.file_size / 1024 / 1024,
+            MAX_CORRESPONDENCE_BYTES // 1024 // 1024,
+        )
+        return
+
+    # Pull text once, cache, parse with the COGC letter parser.
+    # Always read raw (un-truncated) PDF text: `cached_extracted_text`
+    # may be the prompt-shaped 12k-cap version from earlier runs,
+    # which loses the COGC footer fingerprints.
     text = _extract_full_pdf_text(r.file_path)
     if not text:
         stats["docs_text_skipped"] += 1

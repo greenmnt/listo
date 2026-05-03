@@ -195,8 +195,10 @@ def harvest_entities(
         help="comma-separated app type-code prefixes; pass 'all' to scan every category",
     ),
     max_docs_per_app: int = typer.Option(
-        14, "--max-docs-per-app",
-        help="skip apps with more than N total docs (big mixed-use/apartment projects); 0 disables",
+        0, "--max-docs-per-app",
+        help="skip apps with more than N total docs; 0 (default) disables — "
+             "the per-doc size cap (10MB) already protects against single huge files, "
+             "and big projects are exactly where most architects/builders live",
     ),
 ) -> None:
     """Tier-0 entity harvest: regex-parse COGC correspondence into application_entities.
