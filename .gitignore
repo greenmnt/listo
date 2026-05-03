@@ -1,6 +1,7 @@
 # secrets + local config
 .env
 .env.local
+.env.server
 *.cookies
 
 # python build/cache

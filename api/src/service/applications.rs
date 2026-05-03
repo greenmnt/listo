@@ -8,6 +8,30 @@ use crate::pb;
 
 use super::conv::{datetime_str, kind_to_proto, opt_date_str, opt_datetime_str};
 
+/// SQL fragment that derives a dwelling count without depending on the LLM.
+/// Priority: council-reported approved_units → description regex → NULL.
+/// Mirrors the kind regexes in `classify.rs`.
+const DWELLING_COUNT_DERIVED: &str = "
+    CASE
+        WHEN ca.approved_units IS NOT NULL THEN ca.approved_units
+        WHEN ca.description REGEXP '(?i)dual[[:space:]]+occupancy|duplex' THEN 2
+        WHEN ca.description REGEXP '(?i)triplex' THEN 3
+        WHEN ca.description REGEXP '(?i)fourplex|quadruplex' THEN 4
+        WHEN ca.description REGEXP '(?i)secondary[[:space:]]+dwelling|granny[[:space:]]+flat|auxiliary[[:space:]]+dwelling|ancillary[[:space:]]+dwelling' THEN 1
+        ELSE NULL
+    END
+";
+
+/// SQL fragment for derived dwelling kind classification (matches classify.rs).
+const DWELLING_KIND_DERIVED: &str = "
+    CASE
+        WHEN ca.description REGEXP '(?i)secondary[[:space:]]+dwelling|granny[[:space:]]+flat|auxiliary[[:space:]]+dwelling|ancillary[[:space:]]+dwelling' THEN 'granny'
+        WHEN ca.approved_units >= 3 OR ca.description REGEXP '(?i)triplex|fourplex|quadruplex|multi[[:space:]-]+unit|multi[[:space:]-]+dwelling|townhouse' THEN 'big_dev'
+        WHEN ca.description REGEXP '(?i)dual[[:space:]]+occupancy|duplex' THEN 'duplex'
+        ELSE NULL
+    END
+";
+
 pub async fn list(
     pool: &MySqlPool,
     req: pb::ListApplicationsRequest,
@@ -15,49 +39,56 @@ pub async fn list(
     let limit = req.limit.unwrap_or(50).clamp(1, 500);
     let offset = req.offset.unwrap_or(0);
 
-    // LEFT JOIN da_summaries so any DA that's been LLM-summarised lights
-    // up with applicant/builder/dwelling-info/process-stats. Plus two
-    // correlated subqueries for the sales story (pre = parent's last
-    // sale before lodged_date; post = sum of unit-prefixed children's
-    // sales after decision_date). Both join domain_properties on
-    // ds.street_address — exact match — so it only fires when the
-    // LLM-parsed street_address aligns with what Domain has on file.
-    let mut sql = String::from(
+    // Two LEFT JOIN aggregates replace the old LEFT JOIN da_summaries:
+    //   `ents`     — applicant / builder / architect / owner / agent rolled up
+    //                from application_entities ⋈ companies (regex-harvested,
+    //                no LLM in the loop).
+    //   `docs_agg` — counts and total bytes from council_application_documents
+    //                bucketed by doc_kind (migration 0021).
+    // The street_address used in every property-prefix-LIKE join is now
+    // `ca.street_address`, populated by the council scraper at ingest via
+    // split_council_address(raw_address) — 99.9% covered for cogc.
+    // dwelling_count and dwelling_kind are derived via the SQL fragments
+    // above instead of read from da_summaries.
+    let join_kind = if req.analyzed_only.unwrap_or(false) { "INNER" } else { "LEFT" };
+    let mut sql = format!(
         "SELECT ca.id, ca.council_slug, ca.application_id, ca.type_code, ca.application_type, ca.status,
                 ca.decision_outcome, ca.lodged_date, ca.decision_date, ca.approved_units,
                 ca.raw_address, ca.suburb, ca.postcode, ca.description, ca.application_url,
-                ds.applicant_name      AS llm_applicant_name,
-                ds.applicant_acn       AS llm_applicant_acn,
-                ds.applicant_entity_type AS llm_applicant_entity_type,
-                ds.applicant_agent_name AS llm_applicant_agent_name,
-                -- Total DAs across this developer's history, regardless of
-                -- the user's current kind / suburb / search filters. Keyed
-                -- on applicant_company_id which is deduped by ACN > ABN >
-                -- norm_name in `_upsert_company`, so the same dev across
-                -- house / duplex / etc. counts as one.
-                (SELECT COUNT(*) FROM da_summaries ds_all
-                  WHERE ds_all.applicant_company_id IS NOT NULL
-                    AND ds_all.applicant_company_id = ds.applicant_company_id) AS llm_developer_project_count,
-                ds.builder_name        AS llm_builder_name,
-                ds.architect_name      AS llm_architect_name,
-                ds.dwelling_count      AS llm_dwelling_count,
-                ds.dwelling_kind       AS llm_dwelling_kind,
-                ds.project_description AS llm_project_description,
-                ds.lot_on_plan         AS llm_lot_on_plan,
-                ds.status              AS llm_status,
-                ds.n_docs              AS llm_n_docs,
-                ds.n_information_requests AS llm_n_info_requests,
-                ds.n_amendments        AS llm_n_amendments,
-                ds.total_bytes         AS llm_total_bytes,
-                ds.days_lodge_to_decide AS llm_days_lodge_to_decide,
+                ents.applicant_name        AS llm_applicant_name,
+                ents.applicant_acn         AS llm_applicant_acn,
+                ents.applicant_entity_type AS llm_applicant_entity_type,
+                ents.applicant_agent_name  AS llm_applicant_agent_name,
+                -- developer_project_count: distinct DAs where this applicant
+                -- company appears as the applicant. Uses application_entities
+                -- (regex-harvested) instead of da_summaries.applicant_company_id.
+                (SELECT COUNT(DISTINCT ae2.application_id)
+                   FROM application_entities ae2
+                  WHERE ae2.role = 'applicant'
+                    AND ae2.company_id IS NOT NULL
+                    AND ae2.company_id = ents.applicant_company_id) AS llm_developer_project_count,
+                ents.builder_name          AS llm_builder_name,
+                ents.architect_name        AS llm_architect_name,
+                {dwelling_count}           AS llm_dwelling_count,
+                {dwelling_kind}            AS llm_dwelling_kind,
+                ca.description             AS llm_project_description,
+                ca.lot_on_plan             AS llm_lot_on_plan,
+                CASE WHEN ents.applicant_company_id IS NOT NULL
+                     OR docs_agg.n_docs > 0 THEN 'derived'
+                     ELSE NULL END         AS llm_status,
+                docs_agg.n_docs            AS llm_n_docs,
+                docs_agg.n_info_requests   AS llm_n_info_requests,
+                docs_agg.n_amendments      AS llm_n_amendments,
+                docs_agg.total_bytes       AS llm_total_bytes,
+                DATEDIFF(ca.decision_date, ca.lodged_date) AS llm_days_lodge_to_decide,
                 CAST(COALESCE(
                   (SELECT MAX(dp.land_area_m2)
                      FROM domain_properties dp
-                    WHERE dp.display_address LIKE CONCAT(ds.street_address, '%')
+                    WHERE dp.display_address LIKE CONCAT(ca.street_address, '%')
                       AND dp.unit_number = ''),
                   (SELECT MAX(rp.land_area_m2)
                      FROM realestate_properties rp
-                    WHERE rp.display_address LIKE CONCAT(ds.street_address, '%')
+                    WHERE rp.display_address LIKE CONCAT(ca.street_address, '%')
                       AND rp.unit_number = ''),
                   (SELECT MAX(bf.site_area_m2)
                      FROM da_build_features bf
@@ -66,11 +97,11 @@ pub async fn list(
                 ) AS UNSIGNED)                                                        AS site_area_m2,
                 CASE
                   WHEN EXISTS (SELECT 1 FROM domain_properties dp
-                                WHERE dp.display_address LIKE CONCAT(ds.street_address, '%')
+                                WHERE dp.display_address LIKE CONCAT(ca.street_address, '%')
                                   AND dp.unit_number = ''
                                   AND dp.land_area_m2 IS NOT NULL) THEN 'domain'
                   WHEN EXISTS (SELECT 1 FROM realestate_properties rp
-                                WHERE rp.display_address LIKE CONCAT(ds.street_address, '%')
+                                WHERE rp.display_address LIKE CONCAT(ca.street_address, '%')
                                   AND rp.unit_number = ''
                                   AND rp.land_area_m2 IS NOT NULL) THEN 'realestate'
                   WHEN EXISTS (SELECT 1 FROM da_build_features bf
@@ -87,7 +118,7 @@ pub async fn list(
                   (SELECT s.event_price
                      FROM domain_sales s
                      JOIN domain_properties dp ON dp.id = s.domain_property_id
-                    WHERE dp.display_address LIKE CONCAT(ds.street_address, '%')
+                    WHERE dp.display_address LIKE CONCAT(ca.street_address, '%')
                       AND s.event_date < ca.lodged_date
                       AND s.event_date >= DATE_SUB(ca.lodged_date, INTERVAL 10 YEAR)
                       AND s.is_sold = 1
@@ -96,7 +127,7 @@ pub async fn list(
                   (SELECT s.event_price
                      FROM realestate_sales s
                      JOIN realestate_properties rp ON rp.id = s.realestate_property_id
-                    WHERE rp.display_address LIKE CONCAT(ds.street_address, '%')
+                    WHERE rp.display_address LIKE CONCAT(ca.street_address, '%')
                       AND s.event_date < ca.lodged_date
                       AND s.event_date >= DATE_SUB(ca.lodged_date, INTERVAL 10 YEAR)
                       AND s.event_type = 'sold'
@@ -107,7 +138,7 @@ pub async fn list(
                   (SELECT s.event_date
                      FROM domain_sales s
                      JOIN domain_properties dp ON dp.id = s.domain_property_id
-                    WHERE dp.display_address LIKE CONCAT(ds.street_address, '%')
+                    WHERE dp.display_address LIKE CONCAT(ca.street_address, '%')
                       AND s.event_date < ca.lodged_date
                       AND s.event_date >= DATE_SUB(ca.lodged_date, INTERVAL 10 YEAR)
                       AND s.is_sold = 1
@@ -116,7 +147,7 @@ pub async fn list(
                   (SELECT s.event_date
                      FROM realestate_sales s
                      JOIN realestate_properties rp ON rp.id = s.realestate_property_id
-                    WHERE rp.display_address LIKE CONCAT(ds.street_address, '%')
+                    WHERE rp.display_address LIKE CONCAT(ca.street_address, '%')
                       AND s.event_date < ca.lodged_date
                       AND s.event_date >= DATE_SUB(ca.lodged_date, INTERVAL 10 YEAR)
                       AND s.event_type = 'sold'
@@ -126,14 +157,14 @@ pub async fn list(
                 CASE
                   WHEN EXISTS (SELECT 1 FROM domain_sales s
                                  JOIN domain_properties dp ON dp.id = s.domain_property_id
-                                WHERE dp.display_address LIKE CONCAT(ds.street_address, '%')
+                                WHERE dp.display_address LIKE CONCAT(ca.street_address, '%')
                                   AND s.event_date < ca.lodged_date
                                   AND s.event_date >= DATE_SUB(ca.lodged_date, INTERVAL 10 YEAR)
                                   AND s.is_sold = 1
                                   AND s.event_price IS NOT NULL) THEN 'domain'
                   WHEN EXISTS (SELECT 1 FROM realestate_sales s
                                  JOIN realestate_properties rp ON rp.id = s.realestate_property_id
-                                WHERE rp.display_address LIKE CONCAT(ds.street_address, '%')
+                                WHERE rp.display_address LIKE CONCAT(ca.street_address, '%')
                                   AND s.event_date < ca.lodged_date
                                   AND s.event_date >= DATE_SUB(ca.lodged_date, INTERVAL 10 YEAR)
                                   AND s.event_type = 'sold'
@@ -147,7 +178,7 @@ pub async fn list(
                    JOIN domain_properties unit ON unit.id = s.domain_property_id
                   WHERE unit.unit_number <> ''
                     AND EXISTS (SELECT 1 FROM domain_properties parent
-                                 WHERE parent.display_address LIKE CONCAT(ds.street_address, '%')
+                                 WHERE parent.display_address LIKE CONCAT(ca.street_address, '%')
                                    AND parent.street_number = unit.street_number
                                    AND parent.street_name   = unit.street_name
                                    AND parent.suburb        = unit.suburb
@@ -160,7 +191,7 @@ pub async fn list(
                    JOIN domain_properties unit ON unit.id = s.domain_property_id
                   WHERE unit.unit_number <> ''
                     AND EXISTS (SELECT 1 FROM domain_properties parent
-                                 WHERE parent.display_address LIKE CONCAT(ds.street_address, '%')
+                                 WHERE parent.display_address LIKE CONCAT(ca.street_address, '%')
                                    AND parent.street_number = unit.street_number
                                    AND parent.street_name   = unit.street_name
                                    AND parent.suburb        = unit.suburb
@@ -172,25 +203,25 @@ pub async fn list(
                 -- when domain has the row but the field is NULL (e.g. MCU 50 Dolphin).
                 CAST(COALESCE(
                   (SELECT MAX(dp.bedrooms) FROM domain_properties dp
-                    WHERE dp.display_address LIKE CONCAT(ds.street_address, '%')
+                    WHERE dp.display_address LIKE CONCAT(ca.street_address, '%')
                       AND dp.unit_number = ''),
                   (SELECT MAX(rp.bedrooms) FROM realestate_properties rp
-                    WHERE rp.display_address LIKE CONCAT(ds.street_address, '%')
+                    WHERE rp.display_address LIKE CONCAT(ca.street_address, '%')
                       AND rp.unit_number = '')
                 ) AS SIGNED)                                                        AS pre_bedrooms,
                 CAST(COALESCE(
                   (SELECT MAX(dp.bathrooms) FROM domain_properties dp
-                    WHERE dp.display_address LIKE CONCAT(ds.street_address, '%')
+                    WHERE dp.display_address LIKE CONCAT(ca.street_address, '%')
                       AND dp.unit_number = ''),
                   (SELECT MAX(rp.bathrooms) FROM realestate_properties rp
-                    WHERE rp.display_address LIKE CONCAT(ds.street_address, '%')
+                    WHERE rp.display_address LIKE CONCAT(ca.street_address, '%')
                       AND rp.unit_number = '')
                 ) AS SIGNED)                                                        AS pre_bathrooms,
                 -- Pre-redev parcel type (Domain only — Realestate doesn't list
                 -- 'Land'). 'Land' / 'Vacant' indicates the original site had no
                 -- dwelling: the supply delta starts from 0, not 1.
                 (SELECT MAX(dp.property_type) FROM domain_properties dp
-                  WHERE dp.display_address LIKE CONCAT(ds.street_address, '%')
+                  WHERE dp.display_address LIKE CONCAT(ca.street_address, '%')
                     AND dp.unit_number = '')                                          AS pre_property_type,
                 -- Post-redev bedrooms/bathrooms. Priority chain:
                 --   1. domain: sum across distinct unit children — but only
@@ -206,29 +237,29 @@ pub async fn list(
                       FROM domain_properties unit
                      WHERE unit.unit_number <> ''
                        AND EXISTS (SELECT 1 FROM domain_properties parent
-                                    WHERE parent.display_address LIKE CONCAT(ds.street_address, '%')
+                                    WHERE parent.display_address LIKE CONCAT(ca.street_address, '%')
                                       AND parent.street_number = unit.street_number
                                       AND parent.street_name   = unit.street_name
                                       AND parent.suburb        = unit.suburb
                                       AND parent.unit_number   = '')
                      GROUP BY unit.unit_number
-                  ) t HAVING COUNT(t.b) >= ds.dwelling_count),
+                  ) t HAVING COUNT(t.b) >= ({dwelling_count})),
                   (SELECT SUM(t.b) FROM (
                     SELECT MAX(unit.bedrooms) AS b
                       FROM realestate_properties unit
                      WHERE unit.unit_number <> ''
                        AND EXISTS (SELECT 1 FROM realestate_properties parent
-                                    WHERE parent.display_address LIKE CONCAT(ds.street_address, '%')
+                                    WHERE parent.display_address LIKE CONCAT(ca.street_address, '%')
                                       AND parent.street_number = unit.street_number
                                       AND parent.street_name   = unit.street_name
                                       AND parent.suburb        = unit.suburb
                                       AND parent.unit_number   = '')
                      GROUP BY unit.unit_number
-                  ) t HAVING COUNT(t.b) >= ds.dwelling_count),
+                  ) t HAVING COUNT(t.b) >= ({dwelling_count})),
                   (SELECT MAX(bf.bedrooms) FROM da_build_features bf
                     WHERE bf.application_id = ca.id
                       AND bf.template_key = 'build_features_drawings'
-                      AND bf.bedrooms > 0) * NULLIF(ds.dwelling_count, 0)
+                      AND bf.bedrooms > 0) * NULLIF(({dwelling_count}), 0)
                 ) AS SIGNED)                                                        AS post_bedrooms,
                 CAST(COALESCE(
                   (SELECT SUM(t.b) FROM (
@@ -236,69 +267,61 @@ pub async fn list(
                       FROM domain_properties unit
                      WHERE unit.unit_number <> ''
                        AND EXISTS (SELECT 1 FROM domain_properties parent
-                                    WHERE parent.display_address LIKE CONCAT(ds.street_address, '%')
+                                    WHERE parent.display_address LIKE CONCAT(ca.street_address, '%')
                                       AND parent.street_number = unit.street_number
                                       AND parent.street_name   = unit.street_name
                                       AND parent.suburb        = unit.suburb
                                       AND parent.unit_number   = '')
                      GROUP BY unit.unit_number
-                  ) t HAVING COUNT(t.b) >= ds.dwelling_count),
+                  ) t HAVING COUNT(t.b) >= ({dwelling_count})),
                   (SELECT SUM(t.b) FROM (
                     SELECT MAX(unit.bathrooms) AS b
                       FROM realestate_properties unit
                      WHERE unit.unit_number <> ''
                        AND EXISTS (SELECT 1 FROM realestate_properties parent
-                                    WHERE parent.display_address LIKE CONCAT(ds.street_address, '%')
+                                    WHERE parent.display_address LIKE CONCAT(ca.street_address, '%')
                                       AND parent.street_number = unit.street_number
                                       AND parent.street_name   = unit.street_name
                                       AND parent.suburb        = unit.suburb
                                       AND parent.unit_number   = '')
                      GROUP BY unit.unit_number
-                  ) t HAVING COUNT(t.b) >= ds.dwelling_count),
+                  ) t HAVING COUNT(t.b) >= ({dwelling_count})),
                   (SELECT MAX(bf.bathrooms) FROM da_build_features bf
                     WHERE bf.application_id = ca.id
                       AND bf.template_key = 'build_features_drawings'
-                      AND bf.bathrooms > 0) * NULLIF(ds.dwelling_count, 0)
+                      AND bf.bathrooms > 0) * NULLIF(({dwelling_count}), 0)
                 ) AS SIGNED)                                                        AS post_bathrooms,
                 CASE
                   WHEN (SELECT COUNT(DISTINCT unit.unit_number) FROM domain_properties unit
                          WHERE unit.unit_number <> ''
                            AND EXISTS (SELECT 1 FROM domain_properties parent
-                                        WHERE parent.display_address LIKE CONCAT(ds.street_address, '%')
+                                        WHERE parent.display_address LIKE CONCAT(ca.street_address, '%')
                                           AND parent.street_number = unit.street_number
                                           AND parent.street_name   = unit.street_name
                                           AND parent.suburb        = unit.suburb
-                                          AND parent.unit_number   = '')) >= ds.dwelling_count THEN 'domain'
+                                          AND parent.unit_number   = '')) >= ({dwelling_count}) THEN 'domain'
                   WHEN (SELECT COUNT(DISTINCT unit.unit_number) FROM realestate_properties unit
                          WHERE unit.unit_number <> ''
                            AND EXISTS (SELECT 1 FROM realestate_properties parent
-                                        WHERE parent.display_address LIKE CONCAT(ds.street_address, '%')
+                                        WHERE parent.display_address LIKE CONCAT(ca.street_address, '%')
                                           AND parent.street_number = unit.street_number
                                           AND parent.street_name   = unit.street_name
                                           AND parent.suburb        = unit.suburb
-                                          AND parent.unit_number   = '')) >= ds.dwelling_count THEN 'realestate'
+                                          AND parent.unit_number   = '')) >= ({dwelling_count}) THEN 'realestate'
                   WHEN EXISTS (SELECT 1 FROM da_build_features bf
                                 WHERE bf.application_id = ca.id
                                   AND bf.template_key = 'build_features_drawings'
                                   AND (bf.bedrooms > 0 OR bf.bathrooms > 0))
-                       AND ds.dwelling_count > 0 THEN 'da_docs'
+                       AND ({dwelling_count}) > 0 THEN 'da_docs'
                   ELSE NULL
                 END                                                                   AS post_rooms_source,
                 -- Project lifecycle for approved DAs:
                 --   built_sold      = at least one post-decision unit sale
-                --   built_unsold    = unit-prefixed property record exists (so
-                --                     someone listed it, even just for rent),
+                --   built_unsold    = unit-prefixed property record exists,
                 --                     OR Google evidence for the unit address
                 --   abandoned_likely = decision_date >3 years old, no signals
-                --   unknown         = approved but too early to tell, or no
-                --                     signals yet
-                -- NULL for non-approved DAs (refused / pending / withdrawn).
-                -- Project lifecycle for approved DAs. The unit-prefixed
-                -- property checks are TIME-GATED to a post-decision sale
-                -- or listing — otherwise stale pre-redev records (e.g. a
-                -- 2008 unit-listing on a lot that was demolished + rebuilt
-                -- in 2025) would falsely classify the new project as
-                -- built_unsold.
+                --   unknown         = approved but too early to tell
+                -- NULL for non-approved DAs.
                 CASE
                   WHEN LOWER(COALESCE(ca.decision_outcome, '')) NOT LIKE '%approv%' THEN NULL
                   WHEN (SELECT COUNT(*)
@@ -306,7 +329,7 @@ pub async fn list(
                           JOIN domain_properties unit ON unit.id = s.domain_property_id
                          WHERE unit.unit_number <> ''
                            AND EXISTS (SELECT 1 FROM domain_properties parent
-                                        WHERE parent.display_address LIKE CONCAT(ds.street_address, '%')
+                                        WHERE parent.display_address LIKE CONCAT(ca.street_address, '%')
                                           AND parent.street_number = unit.street_number
                                           AND parent.street_name   = unit.street_name
                                           AND parent.suburb        = unit.suburb
@@ -318,7 +341,7 @@ pub async fn list(
                     SELECT 1 FROM domain_properties unit
                      WHERE unit.unit_number <> ''
                        AND EXISTS (SELECT 1 FROM domain_properties parent
-                                    WHERE parent.display_address LIKE CONCAT(ds.street_address, '%')
+                                    WHERE parent.display_address LIKE CONCAT(ca.street_address, '%')
                                       AND parent.street_number = unit.street_number
                                       AND parent.street_name   = unit.street_name
                                       AND parent.suburb        = unit.suburb
@@ -336,7 +359,7 @@ pub async fn list(
                     SELECT 1 FROM realestate_properties unit
                      WHERE unit.unit_number <> ''
                        AND EXISTS (SELECT 1 FROM realestate_properties parent
-                                    WHERE parent.display_address LIKE CONCAT(ds.street_address, '%')
+                                    WHERE parent.display_address LIKE CONCAT(ca.street_address, '%')
                                       AND parent.street_number = unit.street_number
                                       AND parent.street_name   = unit.street_name
                                       AND parent.suburb        = unit.suburb
@@ -351,7 +374,7 @@ pub async fn list(
                        )
                   ) THEN 'built_unsold'
                   WHEN EXISTS (SELECT 1 FROM discovered_urls du
-                                WHERE du.search_address REGEXP CONCAT('^[0-9]+/', SUBSTRING_INDEX(ds.street_address, ',', 1))
+                                WHERE du.search_address REGEXP CONCAT('^[0-9]+/', SUBSTRING_INDEX(ca.street_address, ',', 1))
                                   AND du.url_kind IS NOT NULL
                                   AND du.discovered_at > ca.decision_date) THEN 'built_unsold'
                   WHEN ca.decision_date IS NOT NULL
@@ -359,11 +382,34 @@ pub async fn list(
                   ELSE 'unknown'
                 END                                                                   AS built_status
            FROM council_applications ca
-           __JOIN_KIND__ JOIN da_summaries ds ON ds.application_id = ca.id
+           {join_kind} JOIN (
+             SELECT ae.application_id,
+                    MAX(CASE WHEN ae.role='applicant' THEN c.display_name END) AS applicant_name,
+                    MAX(CASE WHEN ae.role='applicant' THEN c.acn          END) AS applicant_acn,
+                    MAX(CASE WHEN ae.role='applicant' THEN c.entity_type  END) AS applicant_entity_type,
+                    MAX(CASE WHEN ae.role='applicant' THEN ae.company_id  END) AS applicant_company_id,
+                    MAX(CASE WHEN ae.role='agent'     THEN c.display_name END) AS applicant_agent_name,
+                    MAX(CASE WHEN ae.role='builder'   THEN c.display_name END) AS builder_name,
+                    MAX(CASE WHEN ae.role='architect' THEN c.display_name END) AS architect_name,
+                    MAX(CASE WHEN ae.role='owner'     THEN c.display_name END) AS owner_name
+               FROM application_entities ae
+               LEFT JOIN companies c ON c.id = ae.company_id
+              GROUP BY ae.application_id
+           ) ents ON ents.application_id = ca.id
+           LEFT JOIN (
+             SELECT application_id,
+                    CAST(COUNT(*) AS UNSIGNED) AS n_docs,
+                    CAST(COALESCE(SUM(file_size), 0) AS UNSIGNED) AS total_bytes,
+                    CAST(SUM(doc_kind IN ('ir_council','ir_response')) AS UNSIGNED) AS n_info_requests,
+                    CAST(SUM(doc_kind IN ('amendment','further_info')) AS UNSIGNED) AS n_amendments
+               FROM council_application_documents
+              GROUP BY application_id
+           ) docs_agg ON docs_agg.application_id = ca.id
           WHERE 1=1",
+        join_kind = join_kind,
+        dwelling_count = DWELLING_COUNT_DERIVED,
+        dwelling_kind = DWELLING_KIND_DERIVED,
     );
-    let join_kind = if req.analyzed_only.unwrap_or(false) { "INNER" } else { "LEFT" };
-    let mut sql = sql.replace("__JOIN_KIND__", join_kind);
     let mut binds: Vec<String> = Vec::new();
 
     if let Some(kind_str) = &req.kind {
@@ -440,11 +486,6 @@ async fn enrich_unit_sales(
     pool: &MySqlPool,
     items: &mut [pb::Application],
 ) -> Result<(), Status> {
-    // Collect the set of street_address strings we need to look up.
-    // The handler doesn't currently surface street_address on the row,
-    // so we rejoin via insight.lot_on_plan or fall back to raw_address.
-    // Easier: just re-query da_summaries.street_address for each
-    // application_id that has a SaleStory.
     let app_ids: Vec<i64> = items
         .iter()
         .filter(|a| a.sale_story.is_some())
@@ -454,7 +495,8 @@ async fn enrich_unit_sales(
         return Ok(());
     }
 
-    // Build IN (...) placeholder list.
+    // Build IN (...) placeholder list. Uses ca.street_address now (no
+    // da_summaries dependency).
     let placeholders = std::iter::repeat("?").take(app_ids.len()).collect::<Vec<_>>().join(",");
     let sql = format!(
         "SELECT DISTINCT ca.id AS app_pk,
@@ -463,7 +505,6 @@ async fn enrich_unit_sales(
                 CAST(latest.sold_price AS UNSIGNED) AS sold_price,
                 latest.sold_date
            FROM council_applications ca
-           JOIN da_summaries ds ON ds.application_id = ca.id
            JOIN domain_properties unit
              ON unit.unit_number <> ''
            JOIN (
@@ -477,7 +518,7 @@ async fn enrich_unit_sales(
           WHERE ca.id IN ({placeholders})
             AND latest.sold_date > ca.decision_date
             AND EXISTS (SELECT 1 FROM domain_properties parent
-                         WHERE parent.display_address LIKE CONCAT(ds.street_address, '%')
+                         WHERE parent.display_address LIKE CONCAT(ca.street_address, '%')
                            AND parent.street_number = unit.street_number
                            AND parent.street_name   = unit.street_name
                            AND parent.suburb        = unit.suburb
@@ -631,17 +672,29 @@ fn row_to_application_ref(r: &MySqlRow) -> pb::Application {
 }
 
 fn build_insight(r: &MySqlRow) -> Option<pb::DaInsight> {
-    // The LEFT JOIN may yield all-NULLs when no da_summaries row exists;
-    // in that case llm_status is NULL → return None.
+    // Sourced from regex-harvested application_entities + derived dwelling
+    // fields + council_application_documents aggregate (no LLM in the
+    // loop). Returns None if the DA has no entity/doc signal at all
+    // (preserves the old "blank insight = no data" UX).
     let status: Option<String> = r.try_get("llm_status").ok();
     let status = status?;
 
     let total_bytes_u: Option<u64> = r.try_get("llm_total_bytes").ok();
     let total_bytes: Option<i64> = total_bytes_u.map(|v| v as i64);
-    let n_docs_u: Option<u32> = r.try_get("llm_n_docs").ok();
-    let n_info_u: Option<u32> = r.try_get("llm_n_info_requests").ok();
-    let n_amend_u: Option<u32> = r.try_get("llm_n_amendments").ok();
+    let n_docs_u: Option<u64> = r.try_get("llm_n_docs").ok();
+    let n_info_u: Option<u64> = r.try_get("llm_n_info_requests").ok();
+    let n_amend_u: Option<u64> = r.try_get("llm_n_amendments").ok();
     let dev_count: Option<i64> = r.try_get("llm_developer_project_count").ok();
+
+    // dwelling_count comes back as DECIMAL (CASE branches mix integer
+    // literals with approved_units INT). Decode as i64 then narrow.
+    let dwelling_count: Option<i32> = r
+        .try_get::<Option<i64>, _>("llm_dwelling_count")
+        .ok()
+        .flatten()
+        .map(|v| v as i32);
+    // DATEDIFF returns INT — decodes directly as i32.
+    let days: Option<i32> = r.try_get("llm_days_lodge_to_decide").ok();
 
     Some(pb::DaInsight {
         applicant_name: r.try_get("llm_applicant_name").ok(),
@@ -650,7 +703,7 @@ fn build_insight(r: &MySqlRow) -> Option<pb::DaInsight> {
         applicant_agent_name: r.try_get("llm_applicant_agent_name").ok(),
         builder_name: r.try_get("llm_builder_name").ok(),
         architect_name: r.try_get("llm_architect_name").ok(),
-        dwelling_count: r.try_get::<Option<i16>, _>("llm_dwelling_count").ok().flatten().map(|v| v as i32),
+        dwelling_count,
         dwelling_kind: r.try_get("llm_dwelling_kind").ok(),
         project_description: r.try_get("llm_project_description").ok(),
         lot_on_plan: r.try_get("llm_lot_on_plan").ok(),
@@ -659,7 +712,7 @@ fn build_insight(r: &MySqlRow) -> Option<pb::DaInsight> {
         n_information_requests: n_info_u.unwrap_or(0) as i32,
         n_amendments: n_amend_u.unwrap_or(0) as i32,
         total_bytes,
-        days_lodge_to_decide: r.try_get("llm_days_lodge_to_decide").ok(),
+        days_lodge_to_decide: days,
         developer_project_count: dev_count.map(|v| v as i32),
     })
 }

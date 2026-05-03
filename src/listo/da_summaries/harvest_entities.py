@@ -42,7 +42,53 @@ from listo.da_summaries.cogc_correspondence import (
     parse_cogc_letter,
     split_party_names,
 )
-from listo.da_summaries.text_extract import extract_text_for_prompt
+from listo.da_summaries.entity_evidence import (
+    DocLayout,
+    find_offset_in_text,
+    layout_for_span,
+    record_evidence,
+)
+from listo.da_summaries.plan_fingerprints import extract_fingerprints
+from listo.da_summaries.plans_title import extract_from_plan_pdf
+
+
+def _extract_full_pdf_text(file_path: str) -> str:
+    """Raw, untruncated PyMuPDF text for the whole document.
+
+    Why: the prompt-shaping helper (`extract_text_for_prompt`) caps
+    output at ~12k chars to fit an LLM context. COGC letterhead lives
+    in the FOOTER (Council of the City of Gold Coast / phone / email /
+    City Development Branch), so any letter >12k chars loses every
+    fingerprint and `is_cogc_correspondence` returns False — the
+    harvester silently bails. The regex doesn't care about prompt
+    budgets; give it the whole text.
+    """
+    import fitz
+    try:
+        doc = fitz.open(file_path)
+    except Exception:  # noqa: BLE001
+        return ""
+    try:
+        return "\n".join(p.get_text() for p in doc)
+    finally:
+        doc.close()
+
+
+PLAN_DOC_TYPES = (
+    "%Plans%",
+    "%Drawings%",
+)
+
+
+# Bumped when the regex behaviour changes — old predictions stay
+# queryable in entity_evidence under the previous version string.
+EXTRACTOR_CORRESPONDENCE = "cogc_correspondence_regex_v1"
+EXTRACTOR_PLANS = "plans_title_regex_v1"
+
+# Plans larger than this hang pymupdf for minutes (very complex
+# vector content). Most house/duplex plans are <5MB; only very
+# large multi-stage drawing sets exceed this.
+MAX_PLAN_BYTES = 10 * 1024 * 1024  # 10 MB
 
 
 logger = logging.getLogger(__name__)
@@ -106,6 +152,43 @@ def _extract_emit_plan(
 # ---------------------------------------------------------------- DB write
 
 
+def _record_fingerprint(s, *, application_id: int, source_doc_id: int, fp) -> None:
+    """Idempotent insert into doc_fingerprints — keyed on
+    (source_doc_id, fingerprint_kind, normalized_value). Re-runs
+    refresh raw_value/span/layout but never touch resolution fields."""
+    import json as _json
+    s.execute(
+        sql_text("""
+            INSERT INTO doc_fingerprints (
+                application_id, source_doc_id,
+                fingerprint_kind, raw_value, normalized_value,
+                span_start, span_end, page_index, layout
+            ) VALUES (
+                :app_id, :doc_id,
+                :kind, :raw, :norm,
+                :sstart, :send, :pidx, :layout
+            )
+            ON DUPLICATE KEY UPDATE
+                raw_value  = VALUES(raw_value),
+                span_start = VALUES(span_start),
+                span_end   = VALUES(span_end),
+                page_index = VALUES(page_index),
+                layout     = COALESCE(VALUES(layout), layout)
+        """),
+        {
+            "app_id": application_id,
+            "doc_id": source_doc_id,
+            "kind": fp.kind,
+            "raw": fp.raw_value[:500],
+            "norm": fp.normalized_value[:255],
+            "sstart": fp.span_start,
+            "send": fp.span_end,
+            "pidx": fp.page_index,
+            "layout": _json.dumps(fp.layout) if fp.layout else None,
+        },
+    )
+
+
 def _upsert_application_entity(
     s,
     *,
@@ -144,15 +227,23 @@ def _upsert_application_entity(
 # ---------------------------------------------------------------- driver
 
 
-def _iter_candidate_docs(s, app_pk: int | None, limit: int | None):
-    """Document rows that might be COGC correspondence, ordered for
-    deterministic-ish output. Filters at the SQL level on doc_type to
-    avoid scanning every form/plan PDF — every COGC correspondence
-    doc_type contains one of these substrings.
+def _iter_candidate_docs(
+    s, app_pk: int | None, limit: int | None,
+    type_codes: set[str] | None = None,
+    max_docs_per_app: int | None = 14,
+):
+    """Document rows that might be COGC correspondence or plan title
+    blocks, ordered deterministic-ish.
 
-    Returns docs whether or not `extracted_text` is populated; missing
-    text is extracted on-the-fly inside `_harvest` and persisted back
-    so subsequent runs are O(SELECT)."""
+    `type_codes` (optional) restricts to applications whose
+    application_id starts with one of these prefixes (e.g.
+    {'MCU','COM','EDA'} for residential redev). Mirrors the
+    --types option on `listo council scrape-monthly`.
+
+    `max_docs_per_app` skips applications with more than N total docs
+    — those are typically big mixed-use / apartment / retail projects
+    with 30+ consultants, not the simple house/duplex builds we care
+    about. Default 14 matches the empirical small-DA distribution."""
     q = (
         select(
             CouncilApplicationDocument.id,
@@ -160,6 +251,7 @@ def _iter_candidate_docs(s, app_pk: int | None, limit: int | None):
             CouncilApplicationDocument.doc_type,
             CouncilApplicationDocument.mime_type,
             CouncilApplicationDocument.file_path,
+            CouncilApplicationDocument.file_size,
             CouncilApplicationDocument.extracted_text,
         )
         .where(CouncilApplicationDocument.file_path.is_not(None))
@@ -169,6 +261,8 @@ def _iter_candidate_docs(s, app_pk: int | None, limit: int | None):
             | CouncilApplicationDocument.doc_type.ilike("%Information Request%")
             | CouncilApplicationDocument.doc_type.ilike("%Cover Letter%")
             | CouncilApplicationDocument.doc_type.ilike("%Response to IR%")
+            | CouncilApplicationDocument.doc_type.ilike("%Plans%")
+            | CouncilApplicationDocument.doc_type.ilike("%Drawings%")
         )
         .order_by(
             CouncilApplicationDocument.application_id,
@@ -177,6 +271,29 @@ def _iter_candidate_docs(s, app_pk: int | None, limit: int | None):
     )
     if app_pk is not None:
         q = q.where(CouncilApplicationDocument.application_id == app_pk)
+    if type_codes:
+        # Filter by the application_id prefix on the parent app row.
+        from listo.models import CouncilApplication
+        # Use OR of LIKE for each prefix (stays index-friendly).
+        like_clauses = [
+            CouncilApplication.application_id.like(f"{tc}/%")
+            for tc in sorted(type_codes)
+        ]
+        from sqlalchemy import or_
+        q = q.join(
+            CouncilApplication,
+            CouncilApplication.id == CouncilApplicationDocument.application_id,
+        ).where(or_(*like_clauses))
+    if max_docs_per_app:
+        # Subquery: app_ids with ≤ N total docs.
+        from sqlalchemy import func, select as _select
+        small_app_ids = (
+            _select(CouncilApplicationDocument.application_id)
+            .group_by(CouncilApplicationDocument.application_id)
+            .having(func.count(CouncilApplicationDocument.id) <= max_docs_per_app)
+            .scalar_subquery()
+        )
+        q = q.where(CouncilApplicationDocument.application_id.in_(small_app_ids))
     if limit is not None:
         q = q.limit(limit)
     return s.execute(q).all()
@@ -188,11 +305,25 @@ def harvest_application(s, app_pk: int) -> dict:
     return _harvest(s, rows)
 
 
-def harvest_all(app_pk: int | None = None, limit: int | None = None) -> dict:
+def harvest_all(
+    app_pk: int | None = None,
+    limit: int | None = None,
+    type_codes: set[str] | None = None,
+    max_docs_per_app: int | None = 14,
+) -> dict:
     """Walk every (or one) application's candidate docs, harvesting entities."""
     with session_scope() as s:
-        rows = _iter_candidate_docs(s, app_pk, limit)
+        rows = _iter_candidate_docs(
+            s, app_pk, limit,
+            type_codes=type_codes,
+            max_docs_per_app=max_docs_per_app,
+        )
         return _harvest(s, rows)
+
+
+def _is_plan_doc(doc_type: str | None) -> bool:
+    dt = (doc_type or "").lower()
+    return "plan" in dt or "drawing" in dt
 
 
 def _harvest(s, rows: Iterable) -> dict:
@@ -201,67 +332,238 @@ def _harvest(s, rows: Iterable) -> dict:
         "docs_text_extracted": 0,
         "docs_text_skipped": 0,
         "docs_cogc": 0,
+        "docs_plans_with_block": 0,
+        # Plans we scanned but couldn't extract any entity from. By law
+        # every plan PDF must identify a builder/architect/owner-builder,
+        # so this counter is a recall-failure metric — review candidates
+        # for ML training priorities.
+        "docs_plans_no_hit": 0,
+        "docs_plans_skipped_large": 0,
+        "docs_errored": 0,
         "emissions": 0,
         "entity_rows_written": 0,
+        "evidence_rows": 0,
+        "fingerprints_recorded": 0,
         "companies_seen": set(),
     }
 
-    for r in rows:
+    # Materialise rows so we can commit-per-doc without holding the
+    # cursor open across commits.
+    rows = list(rows)
+    total = len(rows)
+
+    for i, r in enumerate(rows, 1):
         stats["docs_seen"] += 1
 
-        text = r.extracted_text
-        if not text:
-            ext = extract_text_for_prompt(
-                file_path=r.file_path, mime_type=r.mime_type, doc_type=r.doc_type,
+        # Periodic progress log so a long run is observable from the
+        # tail of the log file.
+        if i == 1 or i % 50 == 0 or i == total:
+            logger.info(
+                "progress: %d/%d  evidence=%d  fingerprints=%d  companies=%d",
+                i, total, stats["evidence_rows"],
+                stats["fingerprints_recorded"], len(stats["companies_seen"]),
             )
-            text = ext.text
-            if not text:
-                stats["docs_text_skipped"] += 1
-                continue
-            # Persist so the next run skips re-extraction. Same session,
-            # commits with everything else at scope-exit.
-            s.execute(
-                sql_text(
-                    "UPDATE council_application_documents "
-                    "SET extracted_text = :t WHERE id = :i"
-                ),
-                {"t": text, "i": r.id},
+
+        try:
+            _harvest_one(s, r, stats)
+            # Commit per-doc. A bad PDF doesn't take the whole run down,
+            # and DB watchers can see progress in real time.
+            s.commit()
+        except Exception as exc:  # noqa: BLE001
+            stats["docs_errored"] += 1
+            logger.warning(
+                "doc %s (app=%s) errored: %s",
+                r.file_path, r.application_id, exc,
             )
-            stats["docs_text_extracted"] += 1
-
-        parsed = parse_cogc_letter(text)
-        if parsed is None or not parsed.is_cogc:
+            s.rollback()
             continue
-        stats["docs_cogc"] += 1
 
-        emissions = _extract_emit_plan(parsed)
-        if not emissions:
-            continue
-        stats["emissions"] += len(emissions)
+    stats["companies_seen"] = len(stats["companies_seen"])
+    return stats
 
-        # Within a single document, the first applicant emission is "primary".
-        primary_marked = False
-        for name, role, source_field, confidence, etype in emissions:
+
+def _harvest_one(s, r, stats: dict) -> None:
+    """Process a single doc — record fingerprints + entity_evidence +
+    application_entities. Caller wraps in try/except + commit/rollback
+    so per-doc failures don't break the run.
+    """
+    if _is_plan_doc(r.doc_type):
+        # Skip oversized plans — pymupdf hangs on huge / complex
+        # ones and our 12-page scan doesn't help when the file
+        # itself is slow to open.
+        if r.file_size and r.file_size > MAX_PLAN_BYTES:
+            stats["docs_plans_skipped_large"] += 1
+            logger.info(
+                "plan doc %s skipped (file_size=%.1fMB > %dMB cap)",
+                r.file_path, r.file_size / 1024 / 1024, MAX_PLAN_BYTES // 1024 // 1024,
+            )
+            return
+        hits, page_layouts = extract_from_plan_pdf(r.file_path)
+
+        # Always capture identity fingerprints (URL / email / licence /
+        # ACN / ABN / phone) from every plan page, regardless of
+        # whether a named entity was extracted. These are joined to
+        # other docs later to resolve logo-only architect names.
+        fp_count = 0
+        for pl in page_layouts:
+            for fp in extract_fingerprints(pl):
+                _record_fingerprint(
+                    s,
+                    application_id=r.application_id,
+                    source_doc_id=r.id,
+                    fp=fp,
+                )
+                fp_count += 1
+        stats["fingerprints_recorded"] += fp_count
+
+        if not hits:
+            stats["docs_plans_no_hit"] += 1
+            logger.warning(
+                "plan doc %s (app=%s) yielded 0 named entities (%d fingerprints)",
+                r.file_path, r.application_id, fp_count,
+            )
+            return
+        stats["docs_plans_with_block"] += 1
+        for hit in hits:
+            # Record evidence first — independent of upsert success so
+            # the training set captures every regex emission.
+            page_idx = hit.page - 1
+            layout = None
+            if 0 <= page_idx < len(page_layouts):
+                layout = layout_for_span(
+                    page_layouts[page_idx], hit.span_start, hit.span_end,
+                )
+            record_evidence(
+                s,
+                application_id=r.application_id,
+                source_doc_id=r.id,
+                extractor=EXTRACTOR_PLANS,
+                source_text=hit.page_text,
+                span_start=hit.span_start,
+                span_end=hit.span_end,
+                candidate_name=hit.name,
+                candidate_role=hit.role,
+                confidence=hit.confidence,
+                layout=layout,
+            )
+            stats["evidence_rows"] += 1
+
             company_id = _upsert_company(
-                s, display_name=name, entity_type=etype,
+                s,
+                display_name=hit.name,
+                acn=hit.acn,
+                abn=hit.abn,
+                entity_type="company",
             )
             if company_id is None:
                 continue
             stats["companies_seen"].add(company_id)
-            is_primary = (role == "applicant" and not primary_marked)
-            if is_primary:
-                primary_marked = True
+            stats["emissions"] += 1
             _upsert_application_entity(
                 s,
                 application_id=r.application_id,
                 company_id=company_id,
-                role=role,
+                role=hit.role,
                 source_doc_id=r.id,
-                source_field=source_field,
-                confidence=confidence,
-                is_primary=is_primary,
+                source_field="plans_title_block",
+                confidence=hit.confidence,
+                is_primary=False,
             )
             stats["entity_rows_written"] += 1
+        return
 
-    stats["companies_seen"] = len(stats["companies_seen"])
-    return stats
+    # Correspondence path — pull text once, cache, parse with the
+    # COGC letter parser. Always read raw (un-truncated) PDF text:
+    # `cached_extracted_text` may be the prompt-shaped 12k-cap version
+    # from earlier runs, which loses the COGC footer fingerprints.
+    text = _extract_full_pdf_text(r.file_path)
+    if not text:
+        stats["docs_text_skipped"] += 1
+        return
+    # Persist the un-truncated text so summariser/aggregator stages
+    # share the same cache. Earlier truncated values get overwritten.
+    if text != r.extracted_text:
+        s.execute(
+            sql_text(
+                "UPDATE council_application_documents "
+                "SET extracted_text = :t WHERE id = :i"
+            ),
+            {"t": text, "i": r.id},
+        )
+        stats["docs_text_extracted"] += 1
+
+    parsed = parse_cogc_letter(text)
+    if parsed is None or not parsed.is_cogc:
+        return
+    stats["docs_cogc"] += 1
+
+    emissions = _extract_emit_plan(parsed)
+    if not emissions:
+        return
+    stats["emissions"] += len(emissions)
+
+    # Lazily load layout-aware view of the doc — only worth it if
+    # the parser actually emitted anything. One PDF reopen per doc,
+    # not per emission.
+    doc_layout: DocLayout | None = None
+    doc_layout_attempted = False
+
+    # Within a single document, the first applicant emission is "primary".
+    primary_marked = False
+    for name, role, source_field, confidence, etype in emissions:
+        evidence_text = text
+        evidence_span: tuple[int, int] | None = None
+        evidence_layout: dict | None = None
+
+        if not doc_layout_attempted:
+            doc_layout = DocLayout.from_pdf(r.file_path)
+            doc_layout_attempted = True
+
+        if doc_layout is not None:
+            hit = doc_layout.find_layout_for_name(name)
+            if hit is not None:
+                evidence_span = (hit[0], hit[1])
+                evidence_layout = hit[2]
+                evidence_text = doc_layout.concat_text
+
+        if evidence_span is None:
+            # Fallback: locate name in the cached parser text. Loses
+            # layout but at least anchors the span for ML training.
+            evidence_span = find_offset_in_text(text, name)
+
+        if evidence_span is not None:
+            record_evidence(
+                s,
+                application_id=r.application_id,
+                source_doc_id=r.id,
+                extractor=EXTRACTOR_CORRESPONDENCE,
+                source_text=evidence_text,
+                span_start=evidence_span[0],
+                span_end=evidence_span[1],
+                candidate_name=name,
+                candidate_role=role,
+                confidence=confidence,
+                layout=evidence_layout,
+            )
+            stats["evidence_rows"] += 1
+
+        company_id = _upsert_company(
+            s, display_name=name, entity_type=etype,
+        )
+        if company_id is None:
+            continue
+        stats["companies_seen"].add(company_id)
+        is_primary = (role == "applicant" and not primary_marked)
+        if is_primary:
+            primary_marked = True
+        _upsert_application_entity(
+            s,
+            application_id=r.application_id,
+            company_id=company_id,
+            role=role,
+            source_doc_id=r.id,
+            source_field=source_field,
+            confidence=confidence,
+            is_primary=is_primary,
+        )
+        stats["entity_rows_written"] += 1

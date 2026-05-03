@@ -104,6 +104,34 @@ _STRONG_COMPANY_MARKERS = re.compile(
 _TRAILING_JUNK = re.compile(r"[\s,;:.\-]+$")
 
 
+# Common contact-person suffixes the recipient block carries that
+# we want to drop from the firm name. Captures forms like:
+#   "Urbis Pty Ltd (Attention: Madison Ruygrok)"
+#   "Adg Engineers (Attn: David Saul)"
+#   "Pacific Approvals P/L Att: Eric Constantino"
+#   "HPC Planning (Attn: Christopher Waning) Central Tower One Level 4"
+# Anything from " (Att… " onwards (or " Att: ") is dropped.
+_CONTACT_SUFFIX_RE = re.compile(
+    r"\s*[(]?\s*att(?:ention|n)?\s*:[\s\S]*$",
+    re.IGNORECASE,
+)
+
+
+def _strip_contact_suffix(name: str) -> str:
+    """Drop `(Attention: <person>)` / `Att: <person>` / etc. trailing
+    contact-person tags from a captured firm name."""
+    if not name:
+        return name
+    cleaned = _CONTACT_SUFFIX_RE.sub("", name).strip()
+    return _TRAILING_JUNK.sub("", cleaned)
+
+
+def _name_is_too_short(name: str) -> bool:
+    """Reject 1-3 char names — these come from PyMuPDF line-wrapping
+    that left a fragment as the recipient_block primary name."""
+    return len((name or "").strip()) < 4
+
+
 def _looks_like_company(s: str) -> bool:
     return bool(_COMPANY_MARKERS.search(s))
 
@@ -313,7 +341,9 @@ def parse_recipient_block(text: str) -> RecipientBlock | None:
 
     # First line is the primary recipient name.
     if body:
-        rb.primary_name = body[0]
+        primary = _strip_contact_suffix(body[0])
+        # Reject 1-3 char "names" that are PyMuPDF line-wrap fragments.
+        rb.primary_name = primary if not _name_is_too_short(primary) else None
         rest = body[1:]
     else:
         rest = []
@@ -322,7 +352,9 @@ def parse_recipient_block(text: str) -> RecipientBlock | None:
     if rest:
         cm = _CARE_OF_RE.match(rest[0])
         if cm:
-            rb.care_of_agent = cm.group(1).strip()
+            agent = _strip_contact_suffix(cm.group(1).strip())
+            if not _name_is_too_short(agent):
+                rb.care_of_agent = agent
             rest = rest[1:]
 
     rb.address_lines = rest
@@ -356,13 +388,19 @@ def parse_applicant_structured(text: str) -> ApplicantStructuredField | None:
     if not m:
         return None
 
-    out = ApplicantStructuredField(applicant_name=m.group("name").strip() or None)
+    raw_applicant = (m.group("name") or "").strip() or None
+    if raw_applicant:
+        cleaned = _strip_contact_suffix(raw_applicant)
+        raw_applicant = cleaned if not _name_is_too_short(cleaned) else None
+    out = ApplicantStructuredField(applicant_name=raw_applicant)
 
     detail_lines = [ln.strip() for ln in m.group("details").splitlines() if ln.strip()]
     if detail_lines:
         cm = _CARE_OF_RE.match(detail_lines[0])
         if cm:
-            out.care_of_agent = cm.group(1).strip()
+            agent = _strip_contact_suffix(cm.group(1).strip())
+            if not _name_is_too_short(agent):
+                out.care_of_agent = agent
             detail_lines = detail_lines[1:]
     out.contact_lines = detail_lines
     return out
@@ -395,6 +433,9 @@ def parse_refer_by_name(text: str) -> str | None:
     # Skip the structured-form variant where "<NAME>" is actually the
     # "Applicant contact details:" header that snuck through.
     if cand.lower().startswith("applicant contact"):
+        return None
+    cand = _strip_contact_suffix(cand)
+    if _name_is_too_short(cand):
         return None
     return cand or None
 

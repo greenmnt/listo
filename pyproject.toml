@@ -23,6 +23,12 @@ dependencies = [
     "selectolax>=0.3.21",
     "tenacity>=8.4",
     "python-dotenv>=1.0",
+    "transformers>=5.7.0",
+    "datasets>=4.8.5",
+    "torch>=2.11.0",
+    "accelerate>=1.13.0",
+    "seqeval>=1.2.2",
+    "pillow>=12.2.0",
 ]
 
 [project.scripts]
