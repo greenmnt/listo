@@ -558,6 +558,25 @@ class DiscoveredUrl(Base):
     fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
 
 
+class PropertyScrapeAttempt(Base):
+    """One row per (source, display_address). Records every direct-slug
+    fetch we made against Domain or REA — including 404s — so the
+    scrape-batch dedup logic can distinguish "we never tried" from
+    "we tried and the source genuinely has no profile for this
+    address". See alembic/versions/0024_property_scrape_attempts.py."""
+
+    __tablename__ = "property_scrape_attempts"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    source: Mapped[str] = mapped_column(String(20), nullable=False)
+    display_address: Mapped[str] = mapped_column(String(255), nullable=False)
+    url: Mapped[str] = mapped_column(String(1024), nullable=False)
+    http_status: Mapped[int | None] = mapped_column(SmallInteger)
+    result: Mapped[str] = mapped_column(String(20), nullable=False)
+    error_message: Mapped[str | None] = mapped_column(String(500))
+    attempted_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+
+
 # ---------------- DA summaries (Ollama-extracted) ----------------
 
 

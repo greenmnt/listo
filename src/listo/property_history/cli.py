@@ -246,11 +246,17 @@ def _select_targets(
 
 
 def _drop_already_scraped(targets: list[_Target]) -> list[_Target]:
-    """Remove targets whose address has BOTH Domain and REA rows already.
+    """Remove targets whose address is fully covered.
 
-    Skips a candidate only when the same street+suburb prefix appears in
-    both `domain_properties` AND `realestate_properties`. If only one
-    source has it, we re-run so the missing source gets backfilled.
+    A target is considered covered when each source (domain, rea) has
+    EITHER:
+      - a parsed property row in domain_properties / realestate_properties
+        (the address shows up via `display_address LIKE '<street>, <suburb>%'`),
+        OR
+      - a `property_scrape_attempts` row marked 'not_found' for that
+        source — i.e. we've already tried and the source genuinely has
+        no profile for this address (Domain doesn't index everything;
+        re-attempting wastes Google quota and Kasada budget).
 
     Matching is by `display_address LIKE '<street>, <suburb>%'` (case-
     insensitive, prefix). Including the suburb avoids false skips when a
@@ -258,12 +264,14 @@ def _drop_already_scraped(targets: list[_Target]) -> list[_Target]:
     prefix shape is used by the Rust API in
     api/src/service/applications.rs:56.
 
-    Pulls all distinct display_addresses from both tables (small — a few
-    hundred rows currently) and matches in Python; doing one query per
-    candidate would be RTT-bound over the SSH tunnel.
+    Targets where neither source has any record are kept (need scraping).
+    Targets where only one source has a record are kept (need backfill of
+    the other side).
     """
     if not targets:
         return targets
+    from listo.property_history.scrape_attempts import addresses_with_attempt
+
     with session_scope() as s:
         domain_addrs = [r[0] for r in s.execute(sql_text(
             "SELECT DISTINCT display_address FROM domain_properties"
@@ -275,23 +283,56 @@ def _drop_already_scraped(targets: list[_Target]) -> list[_Target]:
     domain_lc = [a.lower() for a in domain_addrs]
     rea_lc = [a.lower() for a in rea_addrs]
 
+    # Addresses Domain returned 404 for — we've already tried, no point
+    # re-attempting until the user manually clears the attempt rows.
+    domain_not_found = [
+        a.lower() for a in addresses_with_attempt(
+            source="domain", results=("not_found",),
+        )
+    ]
+    rea_not_found = [
+        a.lower() for a in addresses_with_attempt(
+            source="realestate", results=("not_found",),
+        )
+    ]
+
     kept: list[_Target] = []
     skipped_both = 0
+    skipped_via_notfound = 0
     skipped_partial = 0  # informational: counted as kept (we'll re-run)
     for t in targets:
         prefix = f"{t.parsed_street}, {t.parsed_suburb}".lower()
         in_domain = any(a.startswith(prefix) for a in domain_lc)
         in_rea = any(a.startswith(prefix) for a in rea_lc)
-        if in_domain and in_rea:
-            skipped_both += 1
+        # The not-found tables key on the freeform address we passed
+        # to fetch_by_address (not the parsed street/suburb), so do an
+        # equality check on that exact string.
+        nf_addr = t.search_address.lower()
+        domain_attempted_404 = nf_addr in domain_not_found
+        rea_attempted_404 = nf_addr in rea_not_found
+
+        domain_covered = in_domain or domain_attempted_404
+        rea_covered = in_rea or rea_attempted_404
+        if domain_covered and rea_covered:
+            if (domain_attempted_404 or rea_attempted_404) and not (in_domain and in_rea):
+                skipped_via_notfound += 1
+            else:
+                skipped_both += 1
             continue
-        if in_domain or in_rea:
+        if domain_covered or rea_covered:
             skipped_partial += 1
         kept.append(t)
     if skipped_both:
         logger.info(
-            "skipped %d targets with BOTH domain+rea rows (use --include-existing to retry)",
+            "skipped %d targets with BOTH domain+rea rows on file "
+            "(use --include-existing to retry)",
             skipped_both,
+        )
+    if skipped_via_notfound:
+        logger.info(
+            "skipped %d targets where one source has data and the other "
+            "was previously a 404 (clear property_scrape_attempts to retry)",
+            skipped_via_notfound,
         )
     if skipped_partial:
         logger.info(

@@ -419,7 +419,13 @@ def fetch_by_address(address: str, *, default_state: str = "QLD") -> FetchPdpRes
 
     Splits on commas to pull out suburb/state/postcode, then runs the
     standard normaliser to get the slug components.
+
+    Records the outcome in `property_scrape_attempts` so future runs
+    can skip addresses Domain genuinely has no profile for, instead
+    of re-attempting them on every batch.
     """
+    from listo.property_history.scrape_attempts import record_attempt
+
     parts = [p.strip() for p in address.split(",") if p.strip()]
     if len(parts) < 2:
         raise ValueError(f"need at least 'street, suburb [state] postcode': {address!r}")
@@ -442,4 +448,25 @@ def fetch_by_address(address: str, *, default_state: str = "QLD") -> FetchPdpRes
         postcode=postcode,
         unit_number=norm.unit_number or None,
     )
-    return fetch_and_persist(url_for_slug(slug))
+    url = url_for_slug(slug)
+    result = fetch_and_persist(url)
+
+    if result.error is None:
+        attempt_result = "found"
+    elif result.http_status == 404:
+        attempt_result = "not_found"
+    else:
+        attempt_result = "error"
+    try:
+        record_attempt(
+            source="domain",
+            display_address=address,
+            url=url,
+            http_status=result.http_status,
+            result=attempt_result,
+            error_message=result.error,
+        )
+    except Exception:  # noqa: BLE001 — telemetry failure must not break the run
+        logger.warning("failed to record property_scrape_attempt for %s", address)
+
+    return result
