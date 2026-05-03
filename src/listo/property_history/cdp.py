@@ -169,9 +169,17 @@ def fetch_html_via_google_click(
                 modifier = "Meta" if os.uname().sysname == "Darwin" else "Control"
                 link.click(modifiers=[modifier])
             target_page = new_page_info.value
-            target_page.wait_for_load_state(wait_until, timeout=timeout_ms)
-            # Click-through doesn't surface a response object; leave
-            # http_status at 0 (callers infer from html shape).
+            # Wait for `load` (not just domcontentloaded) so any
+            # post-DOMContentLoaded redirect chain (REA's canonical
+            # rewrite, source-tracking params) finishes before we
+            # read content.
+            try:
+                target_page.wait_for_load_state("load", timeout=timeout_ms)
+            except Exception:  # noqa: BLE001
+                # `load` can time out on heavy pages — fall through
+                # to settle-then-retry below.
+                pass
+            # http_status not available from a click-through.
         except Exception as exc:  # noqa: BLE001
             logger.info(
                 "google click-through failed for %s (%s) — falling back "
@@ -202,7 +210,7 @@ def fetch_html_via_google_click(
                     )
             dwell = random.uniform(settle_seconds * 0.7, settle_seconds * 1.3)
             time.sleep(dwell)
-            html = target_page.content()
+            html = _read_html_with_navigation_retry(target_page, url=url)
             final_url = target_page.url
             return CdpFetchResult(
                 url=url,
@@ -216,3 +224,33 @@ def fetch_html_via_google_click(
                 target_page.close()
             except Exception:  # noqa: BLE001
                 pass
+
+
+def _read_html_with_navigation_retry(page, *, url: str, attempts: int = 4) -> str:
+    """`page.content()` raises 'page is navigating' when a follow-up
+    redirect is in flight (e.g. REA rewriting to a canonical URL with
+    a source param). Wait for the next stable state and retry; bail
+    after `attempts` to avoid spinning forever."""
+    for i in range(1, attempts + 1):
+        try:
+            return page.content()
+        except Exception as exc:  # noqa: BLE001
+            msg = str(exc)
+            if "navigating and changing" not in msg and "Frame was detached" not in msg:
+                raise
+            if i >= attempts:
+                logger.warning(
+                    "page.content() still racing navigation after %d tries on %s",
+                    attempts, url,
+                )
+                # Last resort: try to grab outerHTML directly.
+                try:
+                    return page.evaluate("document.documentElement.outerHTML")
+                except Exception:  # noqa: BLE001
+                    return ""
+            try:
+                page.wait_for_load_state("load", timeout=8_000)
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(0.5 * i)
+    return ""
