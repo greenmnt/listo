@@ -259,8 +259,13 @@ def fetch_html_via_google_click(
                     logger.warning(
                         "wait_for_function timed out for %s: %s", url, exc,
                     )
+            # Bring the destination tab to the front so it's visibly
+            # rendering (and so a human-watching-the-window sees what
+            # the scraper is doing). Then dwell + randomly scroll
+            # around, like someone reading the listing, before
+            # capturing HTML.
             dwell = random.uniform(settle_seconds * 0.7, settle_seconds * 1.3)
-            time.sleep(dwell)
+            _human_dwell_with_scroll(target_page, total_seconds=dwell, url=url)
             html = _read_html_with_navigation_retry(target_page, url=url)
             final_url = target_page.url
             return CdpFetchResult(
@@ -275,6 +280,57 @@ def fetch_html_via_google_click(
                 target_page.close()
             except Exception:  # noqa: BLE001
                 pass
+
+
+def _human_dwell_with_scroll(page, *, total_seconds: float, url: str) -> None:
+    """Bring `page` to the front and dwell `total_seconds`, scrolling
+    around in random steps with reading-pauses in between. Makes the
+    visit look like a human reading a listing rather than a script
+    that loads the page and immediately reads its HTML.
+
+    All side effects are best-effort; if any browser call fails we
+    just sleep out the remainder of `total_seconds`.
+    """
+    try:
+        page.bring_to_front()
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Probe the page's scroll dimensions once. Falls back to safe
+    # defaults if the page hasn't laid out yet (mid-redirect, etc.).
+    try:
+        scroll_height = int(page.evaluate("document.body.scrollHeight") or 4000)
+        viewport_height = int(page.evaluate("window.innerHeight") or 800)
+    except Exception:  # noqa: BLE001
+        scroll_height, viewport_height = 4000, 800
+    max_scroll = max(0, scroll_height - viewport_height)
+
+    cur = 0
+    deadline = time.time() + total_seconds
+    while time.time() < deadline:
+        # 70% of the time scroll further down; 30% scroll back up.
+        # Real readers do both — re-checking the photos / heading.
+        if random.random() < 0.70:
+            target = min(max_scroll, cur + random.randint(220, 760))
+        else:
+            target = max(0, cur - random.randint(120, 400))
+        # Smooth-ish scroll: a few small steps rather than one jump.
+        steps = random.randint(3, 7)
+        for i in range(1, steps + 1):
+            inter = int(cur + (target - cur) * (i / steps))
+            try:
+                page.evaluate(f"window.scrollTo(0, {inter})")
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(random.uniform(0.04, 0.14))
+            if time.time() >= deadline:
+                return
+        cur = target
+        # Reading pause.
+        pause = random.uniform(0.40, 1.30)
+        sleep_until = min(deadline, time.time() + pause)
+        while time.time() < sleep_until:
+            time.sleep(min(0.1, sleep_until - time.time()))
 
 
 def _read_html_with_navigation_retry(page, *, url: str, attempts: int = 4) -> str:
