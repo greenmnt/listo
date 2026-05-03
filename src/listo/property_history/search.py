@@ -257,34 +257,48 @@ def _do_google_search(
     log_label: str,
 ) -> SearchResult:
     """Shared CDP-search body. Calls Chrome, applies the URL extractor,
-    and on Google-CAPTCHA pauses for the user before retrying."""
-    for attempt in range(1, _CAPTCHA_RETRY_LIMIT + 1):
-        _throttle()
-        url = GOOGLE_BASE + _quote(query)
-        logger.info("%s: %s", log_label, query)
-        with cdp_session() as (_browser, ctx):
-            page = ctx.new_page()
-            try:
-                page.goto(url, wait_until="domcontentloaded", timeout=20_000)
-                html = page.content()
-            finally:
-                page.close()
-        if _is_google_captcha(html):
-            logger.warning(
-                "captcha detected (html %d bytes, attempt %d/%d)",
-                len(html), attempt, _CAPTCHA_RETRY_LIMIT,
-            )
-            if attempt >= _CAPTCHA_RETRY_LIMIT:
-                raise GoogleCaptchaError(
-                    f"google captcha persists after {_CAPTCHA_RETRY_LIMIT} retries"
+    and on Google-CAPTCHA keeps the tab open and pauses for the user
+    to solve the puzzle on the same page before retrying."""
+    _throttle()
+    url = GOOGLE_BASE + _quote(query)
+    logger.info("%s: %s", log_label, query)
+    with cdp_session() as (_browser, ctx):
+        # Bring Chrome to the foreground via a focused tab.
+        page = ctx.new_page()
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=20_000)
+            html = page.content()
+            for attempt in range(1, _CAPTCHA_RETRY_LIMIT + 1):
+                if not _is_google_captcha(html):
+                    break
+                logger.warning(
+                    "captcha detected (html %d bytes, attempt %d/%d)",
+                    len(html), attempt, _CAPTCHA_RETRY_LIMIT,
                 )
-            _wait_for_captcha_solve(query)
-            continue
-        urls = sorted(extractor(html))
-        return SearchResult(query=query, urls=urls, page_html_size=len(html))
-    # Loop falls through only when we hit the captcha cap above; keep
-    # mypy happy:
-    raise GoogleCaptchaError("unreachable")
+                # Bring this tab to front so the user can see + solve
+                # the challenge. (No-op if Chrome is already focused.)
+                try:
+                    page.bring_to_front()
+                except Exception:  # noqa: BLE001
+                    pass
+                if attempt >= _CAPTCHA_RETRY_LIMIT:
+                    raise GoogleCaptchaError(
+                        f"google captcha persists after {_CAPTCHA_RETRY_LIMIT} retries"
+                    )
+                _wait_for_captcha_solve(query)
+                # Reload the same tab to re-evaluate captcha state. If
+                # the user solved it inline, Google usually redirects
+                # to the real results automatically — but reloading
+                # gives us a clean read either way.
+                try:
+                    page.reload(wait_until="domcontentloaded", timeout=20_000)
+                except Exception:  # noqa: BLE001
+                    page.goto(url, wait_until="domcontentloaded", timeout=20_000)
+                html = page.content()
+        finally:
+            page.close()
+    urls = sorted(extractor(html))
+    return SearchResult(query=query, urls=urls, page_html_size=len(html))
 
 
 class GoogleCaptchaError(RuntimeError):
